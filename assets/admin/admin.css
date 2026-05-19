@@ -1,0 +1,132 @@
+.srt-admin .srt-tabs {
+	margin-bottom: 16px;
+}
+
+.srt-admin .srt-card {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	border-radius: 4px;
+	padding: 18px 22px;
+	margin-bottom: 16px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.srt-admin .srt-card h2 {
+	margin-top: 0;
+	border-bottom: 1px solid #eee;
+	padding-bottom: 8px;
+}
+
+.srt-admin .widefat th,
+.srt-admin .widefat td {
+	vertical-align: top;
+}
+
+.srt-admin .form-table th {
+	width: 220px;
+}
+
+.srt-admin textarea {
+	width: 100%;
+}
+
+.srt-admin .button.small,
+.srt-admin .button-small {
+	margin-right: 4px;
+}
+
+.srt-admin .srt-provider-form th {
+	width: 180px;
+}
+
+.srt-admin .srt-provider-table .regular-text {
+	width: 100%;
+	max-width: 350px;
+}
+
+.srt-admin .srt-provider-table textarea {
+	min-width: 160px;
+}
+
+.srt-admin .srt-actions-row {
+	margin-top: 10px;
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.srt-admin .srt-status {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.srt-admin .srt-status-active {
+	color: #167a3d;
+	background: #e8f7ee;
+}
+
+.srt-admin .srt-status-ok {
+	color: #167a3d;
+	background: #e8f7ee;
+}
+
+.srt-admin .srt-status-error {
+	color: #b42318;
+	background: #fdecec;
+}
+
+.srt-admin .srt-status-not_tested {
+	color: #6941c6;
+	background: #f4f0ff;
+}
+
+.srt-admin .srt-provider-editor-row td {
+	background: #f8fafc;
+}
+
+.srt-admin .srt-preview-panel {
+	background: #f8fbff;
+	border: 1px solid #d7e3f3;
+	border-radius: 4px;
+	padding: 14px 16px;
+	margin-bottom: 16px;
+}
+
+.srt-admin .srt-preview-panel h2 {
+	margin: 0 0 10px;
+}
+
+.srt-admin .srt-preview-content {
+	margin-top: 12px;
+	padding: 14px;
+	background: #f8fafc;
+	border: 1px solid #dbe3ea;
+	border-radius: 6px;
+	max-height: 360px;
+	overflow: auto;
+}
+
+.srt-admin .srt-preview-status {
+	font-weight: 600;
+	color: #0f766e;
+}
+
+.srt-admin .srt-preview-status-error {
+	color: #b91c1c;
+}
+
+.srt-admin .srt-preview-warnings {
+	margin-top: 10px;
+	padding: 10px 12px;
+	background: #fff7ed;
+	border: 1px solid #fed7aa;
+	border-radius: 6px;
+}
+
+.srt-admin .srt-preview-warnings ul {
+	margin: 0;
+	padding-left: 18px;
+}
