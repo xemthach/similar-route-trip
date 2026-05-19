@@ -77,3 +77,41 @@ Templates can be edited or reset to defaults.
 - Migration from `0.1.0` to `0.2.0` is additive and does not drop route rows.
 - AI generation is disabled by default.
 - Existing shortcodes and public route REST endpoints remain compatible.
+
+## GitHub release flow
+
+1. Update code and version.
+2. Update `CHANGELOG.md`.
+3. Run lint and smoke tests.
+4. Commit with a release message.
+5. Tag the release, for example `v0.4.11`.
+6. Push `main` and the tag to GitHub.
+
+Example:
+
+```bash
+git add .
+git commit -m "Release Similar Route Trip 0.4.11"
+git tag -a v0.4.11 -m "Similar Route Trip 0.4.11"
+git push origin main
+git push origin v0.4.11
+```
+
+## GitHub release notes template
+
+```md
+## Highlights
+- ...
+
+## QA
+- Lint: pass
+- Preview: pass
+- Create post: pass
+- Queue: pass
+
+## Changed files
+- ...
+
+## Notes
+- ...
+```

@@ -1,0 +1,23 @@
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local/runtime files
+tmp_*.php
+*.log
+*.cache
+phpunit.result.cache
+
+# Package/build outputs
+node_modules/
+vendor/
+dist/
+build/
+
+# WordPress local-only files
+wp-config-local.php
+wp-content/debug.log
