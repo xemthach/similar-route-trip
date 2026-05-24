@@ -1,6 +1,6 @@
 # Tuyen Di Pho Bien (Simular Route Trip)
 
-Version: `0.4.13`
+Version: `0.5.0`
 
 Independent WordPress plugin for popular taxi routes, Similar Route recommendations, Distance Calculator Map pricing bridge, SEO prompts, REST API, and shortcodes.
 

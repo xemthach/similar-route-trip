@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.0] - 2026-05-24
+
+### Added
+- Added dedicated AI runtime and provider registries: `AIRuntimeConfig`, `ContentProviderRegistry`, `ImageProviderRegistry`, `ProviderSelector`, `ProviderHealthManager`, and `UsageTracker`.
+- Added image pipeline modules for AI + stock providers with fallback order and Media Library attachment flow: `SRT_Image_Manager`, `SRT_AI_Image_Provider`, `SRT_Unsplash_Provider`, `SRT_Pexels_Provider`, `SRT_Pixabay_Provider`, `SRT_Placeholder_Provider`.
+- Added worker/job queue system for batch generation: `JobRepository`, `QueueManager`, `QueueWorkerConfig`, and `Worker`.
+- Added admin UI surfaces for provider CRUD/testing, image source settings, queue worker controls, and image preview/search actions.
+
+### Fixed
+- Fixed AI candidate resolution so content/image generation can still use legacy `srt_ai_settings` keys when new registries are empty.
+- Fixed content creation pipeline to queue image generation only after post creation succeeds and keep post creation non-blocking when image generation fails.
+- Fixed provider test flow to test content/image capability paths explicitly instead of inferring one mixed path.
+- Fixed logging hygiene to reduce sensitive token/key leakage in stored log rows.
+
+### Changed
+- Refactored AI orchestration to separate content and image configs while keeping backward-compatible migration from legacy options.
+- Changed content generation flow to run through queue jobs in admin actions instead of long synchronous requests.
+- Updated plugin runtime version metadata to `0.5.0`.
+
+### Removed
+- Removed direct dependency on single mixed provider runtime path by introducing explicit content/image registries and failover routing.
+
+### Security
+- Hardened runtime/provider logging and provider handling to avoid storing raw API credentials in normal operational logs.
+
 ## 0.4.13 - 2026-05-23
 
 - Split the AI runtime into separate runtime, content-provider, and image-provider registries with backward-compatible migration from the legacy `srt_ai_settings` option.
