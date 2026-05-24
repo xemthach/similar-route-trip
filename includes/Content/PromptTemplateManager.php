@@ -82,8 +82,8 @@ final class PromptTemplateManager {
 		if ( '' === $template ) {
 			return $template;
 		}
-		$prefix = "BAT BUOC: Viet tieng Viet co dau day du, khong duoc tra ve ASCII-only. Neu can, hay tu kiem tra va sua lai truoc khi tra ket qua.\n\n";
-		if ( false !== stripos( $template, 'Viet tieng Viet co dau day du' ) ) {
+		$prefix = "BẮT BUỘC: Toàn bộ nội dung phải viết bằng tiếng Việt có dấu chuẩn Unicode UTF-8. Không được trả về tiếng Việt không dấu, không romanize. Nếu phát hiện đoạn không dấu trong title, heading, meta, paragraph hoặc FAQ thì phải tự viết lại trước khi trả kết quả.\nBẮT BUỘC: Không lặp paragraph, không lặp ý giữa các section, không kéo dài bằng filler.\n\n";
+		if ( false !== stripos( $template, 'Toàn bộ nội dung phải viết bằng tiếng Việt có dấu' ) ) {
 			return $template;
 		}
 		return $prefix . $template;

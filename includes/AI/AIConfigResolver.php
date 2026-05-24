@@ -7,8 +7,8 @@ defined( 'ABSPATH' ) || exit;
 
 final class AIConfigResolver {
 	public static function get_config( string $purpose = 'content' ): array {
-		$settings = AIConfig::get();
-		if ( 'ai_commerce_agent' === ( $settings['mode'] ?? '' ) ) {
+		$runtime = AIRuntimeConfig::get();
+		if ( 'ai_commerce_agent' === ( $runtime['mode'] ?? '' ) ) {
 			$config = AICommerceAgentConfigAdapter::get_config( $purpose );
 			if ( ! empty( $config['ready'] ) ) {
 				return $config;
@@ -17,7 +17,7 @@ final class AIConfigResolver {
 			return $config;
 		}
 
-		if ( 'own' !== ( $settings['mode'] ?? 'disabled' ) ) {
+		if ( 'own' !== ( $runtime['mode'] ?? 'disabled' ) ) {
 			return [
 				'ready'  => false,
 				'source' => 'disabled',
@@ -26,10 +26,12 @@ final class AIConfigResolver {
 			];
 		}
 
-		$config = AIConfig::active_provider_config( $purpose );
-		$config['ready']  = ! empty( $config['api_key_plain'] ) && ( ! empty( $config['model_content'] ) || 'image' === $purpose );
-		$config['source'] = 'own_config';
-		$config['errors'] = $config['ready'] ? [] : [ 'Missing API key or model in SRT AI settings.' ];
+		$config = 'image' === $purpose
+			? AIService::first_image_candidate_config()
+			: AIService::first_content_candidate_config();
+		$config['ready'] = ! empty( $config['provider_id'] ?? '' );
+		$config['source'] = 'image' === $purpose ? 'image_provider_registry' : 'content_provider_registry';
+		$config['errors'] = $config['ready'] ? [] : [ 'No enabled provider is ready for this task.' ];
 		return $config;
 	}
 

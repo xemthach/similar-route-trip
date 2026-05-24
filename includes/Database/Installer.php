@@ -82,6 +82,7 @@ final class Installer {
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 		dbDelta( $sql );
 		self::create_queue_table();
+		self::create_jobs_table();
 		self::create_logs_table();
 	}
 
@@ -131,6 +132,41 @@ final class Installer {
 			KEY route_id (route_id),
 			KEY post_id (post_id),
 			KEY created_at (created_at)
+		) {$charset_collate};";
+		dbDelta( $sql );
+	}
+
+	private static function create_jobs_table(): void {
+		global $wpdb;
+
+		$table           = $wpdb->prefix . 'srt_jobs';
+		$charset_collate = $wpdb->get_charset_collate();
+		$sql             = "CREATE TABLE {$table} (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			job_type varchar(50) NOT NULL DEFAULT '',
+			route_id bigint(20) unsigned NOT NULL DEFAULT 0,
+			post_id bigint(20) unsigned NOT NULL DEFAULT 0,
+			topic varchar(80) NOT NULL DEFAULT '',
+			content_length varchar(40) NOT NULL DEFAULT '',
+			payload_json longtext NOT NULL,
+			status varchar(30) NOT NULL DEFAULT 'pending',
+			priority smallint unsigned NOT NULL DEFAULT 10,
+			worker_id varchar(80) NOT NULL DEFAULT '',
+			attempts tinyint unsigned NOT NULL DEFAULT 0,
+			max_attempts tinyint unsigned NOT NULL DEFAULT 3,
+			locked_at datetime NULL DEFAULT NULL,
+			available_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			started_at datetime NULL DEFAULT NULL,
+			finished_at datetime NULL DEFAULT NULL,
+			error_message text NULL,
+			created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY  (id),
+			KEY status (status),
+			KEY job_type (job_type),
+			KEY route_id (route_id),
+			KEY available_at (available_at),
+			KEY priority (priority)
 		) {$charset_collate};";
 		dbDelta( $sql );
 	}

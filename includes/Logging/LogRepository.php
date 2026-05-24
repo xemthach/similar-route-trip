@@ -14,6 +14,8 @@ final class LogRepository {
 	public static function add( string $level, string $event, string $message = '', array $context = [] ): void {
 		global $wpdb;
 		unset( $context['api_key'], $context['key'], $context['authorization'] );
+		$context = self::redact_context( $context );
+		$message = self::redact_sensitive_text( $message );
 		$wpdb->insert(
 			self::table(),
 			[
@@ -28,6 +30,27 @@ final class LogRepository {
 			],
 			[ '%s', '%s', '%d', '%d', '%s', '%s', '%s', '%s' ]
 		);
+	}
+
+	private static function redact_context( array $context ): array {
+		foreach ( $context as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$context[ $key ] = self::redact_context( $value );
+				continue;
+			}
+			if ( ! is_scalar( $value ) ) {
+				continue;
+			}
+			$context[ $key ] = self::redact_sensitive_text( (string) $value );
+		}
+		return $context;
+	}
+
+	private static function redact_sensitive_text( string $text ): string {
+		$text = preg_replace( '/\bsk-[A-Za-z0-9_-]{12,}\b/', '[redacted]', $text ) ?? $text;
+		$text = preg_replace( '/\bBearer\s+[A-Za-z0-9._-]{12,}\b/i', 'Bearer [redacted]', $text ) ?? $text;
+		$text = preg_replace( '/\b(api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*[A-Za-z0-9._-]{8,}\b/i', '$1=[redacted]', $text ) ?? $text;
+		return $text;
 	}
 
 	public static function latest( int $limit = 100 ): array {

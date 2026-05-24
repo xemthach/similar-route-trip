@@ -3,7 +3,7 @@
  * Plugin Name:       Tuyen Di Pho Bien (Simular Route Trip)
  * Plugin URI:        https://example.com/similar-route-trip
  * Description:       Independent popular taxi route manager, SEO landing content, shortcodes, schema, and Distance Calculator pricing bridge.
- * Version:           0.4.11
+ * Version:           0.4.13
  * Requires at least: 6.4
  * Requires PHP:      7.4
  * Author:            Flavor Mien Tay
@@ -19,8 +19,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'SRT_VERSION', '0.4.11' );
-define( 'SRT_DB_VERSION', '0.4.11' );
+define( 'SRT_VERSION', '0.4.13' );
+define( 'SRT_DB_VERSION', '0.4.13' );
 define( 'SRT_PLUGIN_FILE', __FILE__ );
 define( 'SRT_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SRT_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

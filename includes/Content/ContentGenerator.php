@@ -3,12 +3,14 @@ declare( strict_types=1 );
 
 namespace SimilarRouteTrip\Content;
 
-use SimilarRouteTrip\AI\AIConfig;
 use SimilarRouteTrip\AI\AIConfigResolver;
+use SimilarRouteTrip\AI\AIRuntimeConfig;
 use SimilarRouteTrip\AI\AIService;
+use SimilarRouteTrip\AI\ImageProviderRegistry;
 use SimilarRouteTrip\Database\RouteRepository;
 use SimilarRouteTrip\Logging\LogRepository;
 use SimilarRouteTrip\Content\ContentSimilarityChecker;
+use SimilarRouteTrip\Queue\JobRepository;
 use SimilarRouteTrip\Queue\QueueRepository;
 
 defined( 'ABSPATH' ) || exit;
@@ -60,8 +62,8 @@ final class ContentGenerator {
 			];
 		}
 
-		$config = AIConfig::get();
-		if ( empty( $config['enable_content'] ) ) {
+		$config = AIRuntimeConfig::get();
+		if ( empty( $config['enable_content_generation'] ) ) {
 			return [ 'success' => false, 'prompt' => $prompt, 'content' => '', 'error' => 'AI content generation disabled.' ];
 		}
 
@@ -132,7 +134,11 @@ final class ContentGenerator {
 			$structured['faq'] = self::build_manual_faq( $route, (string) ( $context['topic_id'] ?? $template_key ), $context );
 		}
 		if ( empty( $structured['featured_image_prompt'] ) ) {
-			$structured['featured_image_prompt'] = sprintf( 'Anh taxi thuc te cho tuyen %s di %s, phong cach mien Tay Viet Nam, sang ro, chuyen nghiep.', (string) ( $route['from_city'] ?? '' ), (string) ( $route['to_city'] ?? '' ) );
+			$structured['featured_image_prompt'] = sprintf(
+				'Realistic photo-style image of a clean taxi traveling from %s to %s in the Mekong Delta, Vietnam, natural daylight, local travel atmosphere, no text, no logo, no watermark.',
+				(string) ( $route['from_city'] ?? '' ),
+				(string) ( $route['to_city'] ?? '' )
+			);
 		}
 		if ( empty( $structured['schema_summary'] ) ) {
 			$structured['schema_summary'] = 'Service + FAQPage';
@@ -174,7 +180,7 @@ final class ContentGenerator {
 			$result['error'] ?? 'AI content generated.',
 			[
 				'route_id' => (int) ( $route['id'] ?? 0 ),
-				'provider' => $config['provider'] ?? '',
+				'provider' => (string) ( AIConfigResolver::get_config( 'content' )['provider'] ?? '' ),
 				'source'   => AIConfigResolver::get_source(),
 			]
 		);
@@ -317,7 +323,7 @@ final class ContentGenerator {
 
 		$postarr = [
 			'post_type'    => in_array( (string) ( $args['post_type'] ?? 'post' ), get_post_types(), true ) ? (string) $args['post_type'] : 'post',
-			'post_status'  => in_array( (string) ( $args['status'] ?? 'draft' ), [ 'draft', 'pending', 'publish' ], true ) ? (string) $args['status'] : 'draft',
+			'post_status'  => in_array( (string) ( $args['status'] ?? AIRuntimeConfig::get()['default_post_status'] ?? 'draft' ), [ 'draft', 'pending', 'publish' ], true ) ? (string) ( $args['status'] ?? AIRuntimeConfig::get()['default_post_status'] ?? 'draft' ) : 'draft',
 			'post_title'   => $title,
 			'post_name'    => $post_name,
 			'post_content' => wp_kses_post( $content ),
@@ -326,7 +332,7 @@ final class ContentGenerator {
 				'_srt_route_id'           => $route_id,
 				'_srt_route_slug'         => $route['slug'],
 				'_srt_generated_by_ai'    => ! empty( $args['use_ai'] ) ? 1 : 0,
-				'_srt_ai_provider'        => AIConfig::get()['provider'] ?? '',
+				'_srt_ai_provider'        => (string) ( AIConfigResolver::get_config( 'content' )['provider'] ?? '' ),
 				'_srt_ai_config_source'   => AIConfigResolver::get_source(),
 				'_srt_content_version'    => SRT_VERSION,
 				'_srt_topic'              => $topic,
@@ -370,25 +376,45 @@ final class ContentGenerator {
 			]
 		);
 
-		$ai_settings = AIConfig::get();
-		$queue_image = ! empty( $ai_settings['enable_image'] ) && ! empty( $ai_settings['enable_featured_image'] );
+		$image_settings = ImageProviderRegistry::get();
+		$runtime = AIRuntimeConfig::get();
+		$requested_image_mode = ! empty( $args['image_source_mode'] ) ? (string) $args['image_source_mode'] : (string) ( $image_settings['image_source_strategy'] ?? 'disabled' );
+		$requested_image_count = array_key_exists( 'image_count', $args )
+			? max( 0, (int) $args['image_count'] )
+			: (int) ( 'custom' === (string) ( $image_settings['images_per_post'] ?? '' ) ? (int) ( $image_settings['images_per_post_custom'] ?? 1 ) : (int) ( $image_settings['images_per_post'] ?? 1 ) );
+		$queue_image = ! empty( $runtime['enable_image_generation'] )
+			&& 'disabled' !== $requested_image_mode
+			&& $requested_image_count > 0;
+		if ( array_key_exists( 'generate_images', $args ) ) {
+			$queue_image = $queue_image && ! empty( $args['generate_images'] );
+		}
+		$image_queue_id = 0;
+		$image_queue_type = '';
 		if ( $queue_image ) {
-			$queue_id = QueueRepository::add(
-				$route_id,
-				'generate_image',
-				[
-					'post_id'   => (int) $post_id,
-					'overwrite' => false,
-				]
-			);
+			$payload = [
+				'post_id'   => (int) $post_id,
+				'overwrite' => false,
+				'image_count' => $requested_image_count,
+				'image_source_mode' => sanitize_key( (string) $requested_image_mode ),
+				'image_style' => sanitize_key( (string) ( $args['image_style'] ?? '' ) ),
+				'insert_images_into_content' => ! empty( $args['insert_images_into_content'] ) ? 1 : 0,
+			];
+			$queue_id = 0;
+			if ( ! empty( $args['use_job_queue'] ) ) {
+				$queue_id = JobRepository::enqueue( 'generate_image', $route_id, $payload, [ 'priority' => 20, 'max_attempts' => (int) ( $runtime['max_retries'] ?? 2 ) ] );
+			} else {
+				$queue_id = QueueRepository::add( $route_id, 'generate_image', $payload, 2 );
+			}
 			if ( $queue_id > 0 ) {
+				$image_queue_id = (int) $queue_id;
+				$image_queue_type = ! empty( $args['use_job_queue'] ) ? 'job' : 'legacy';
 				RouteRepository::update_generation_meta(
 					$route_id,
 					[
 						'ai_status' => 'image_queued',
 					]
 				);
-				LogRepository::add( 'info', 'image_queue_created', 'Featured image task queued after post creation.', [ 'route_id' => $route_id, 'post_id' => (int) $post_id, 'queue_id' => $queue_id ] );
+				LogRepository::add( 'info', 'image_queue_created', 'Featured image task queued after post creation.', [ 'route_id' => $route_id, 'post_id' => (int) $post_id, 'queue_id' => $queue_id, 'queue_type' => $image_queue_type ] );
 			}
 		}
 
@@ -401,13 +427,22 @@ final class ContentGenerator {
 			'view_url'    => get_permalink( (int) $post_id ),
 			'quality_score'  => (int) $quality['score'],
 			'similarity'     => (array) $similarity,
+			'image_queued'   => $image_queue_id > 0,
+			'image_queue_id' => $image_queue_id,
+			'image_queue_type' => $image_queue_type,
 		];
 	}
 
-	private static function route_title( array $route ): string {
-		$from = (string) ( $route['from_city'] ?? '' );
-		$to   = (string) ( $route['to_city'] ?? '' );
-		return sprintf( 'Taxi %s di %s', $from, $to );
+private static function route_title( array $route ): string {
+	$from = (string) ( $route['from_city'] ?? '' );
+	$to   = (string) ( $route['to_city'] ?? '' );
+	return sprintf( "Taxi %s \u{0111}i %s", $from, $to );
+	/* legacy block removed:
+	$from = (string) ( $route['from_city'] ?? '' );
+	$to   = (string) ( $route['to_city'] ?? '' );
+	return sprintf( 'Taxi %s đi %s', $from, $to );
+		return sprintf( 'Taxi %s đi %s', $from, $to );
+	*/
 	}
 
 	private static function similarity_check( int $route_id, string $topic, string $content ): array {
@@ -613,7 +648,11 @@ final class ContentGenerator {
 			'slug_suggestion'       => (string) ( $route['slug'] ?? '' ),
 			'article_html'          => $article,
 			'faq'                   => self::build_manual_faq( $route, $topic, $context ),
-			'featured_image_prompt' => sprintf( 'Anh taxi thuc te cho tuyen %s di %s, phong cach mien Tay Viet Nam, sang ro, chuyen nghiep.', $from, $to ),
+			'featured_image_prompt' => sprintf(
+				'Realistic photo-style image of a clean taxi traveling from %s to %s in the Mekong Delta, Vietnam, natural daylight, local travel atmosphere, no text, no logo, no watermark.',
+				$from,
+				$to
+			),
 			'internal_links'        => [
 				[
 					'anchor' => sprintf( 'Xem them tuyen %s di %s', $from, $to ),
@@ -625,7 +664,100 @@ final class ContentGenerator {
 		];
 	}
 
-	private static function build_meta_description( array $route, string $topic = 'route_landing' ): string {
+private static function build_meta_description( array $route, string $topic = 'route_landing' ): string {
+	$from     = trim( (string) ( $route['from_city'] ?? '' ) );
+	$to       = trim( (string) ( $route['to_city'] ?? '' ) );
+	$distance = trim( (string) ( $route['distance_km'] ?? '' ) );
+	$duration = trim( (string) ( $route['duration_min'] ?? '' ) );
+	$price    = trim( (string) ( $route['price_display'] ?? '' ) );
+	$topic    = TopicTemplateRegistry::sanitize_topic( $topic );
+
+	$base = sprintf(
+		'Taxi %s đi %s, quãng đường khoảng %s km, thời gian tham khảo %s phút, giá tham khảo %s. Đặt xe riêng linh hoạt, phù hợp đi công tác và gia đình.',
+		$from,
+		$to,
+		$distance ?: 'đang cập nhật',
+		$duration ?: 'đang cập nhật',
+		$price ?: 'đang cập nhật'
+	);
+
+	switch ( $topic ) {
+		case 'airport_route':
+			$base = sprintf(
+				'Taxi %s đi %s phù hợp khách cần đúng giờ bay, có hành lý và cần đón trả tận nơi. Giá tham khảo %s.',
+				$from,
+				$to,
+				$price ?: 'đang cập nhật'
+			);
+			break;
+		case 'hospital_route':
+			$base = sprintf(
+				'Taxi %s đi %s phù hợp khách đi khám bệnh, người lớn tuổi hoặc cần đến bệnh viện sớm. Thời gian tham khảo %s phút, giá từ %s.',
+				$from,
+				$to,
+				$duration ?: 'đang cập nhật',
+				$price ?: 'đang cập nhật'
+			);
+			break;
+		case 'business_trip':
+			$base = sprintf(
+				'Taxi %s đi %s dành cho khách công tác cần lịch trình rõ ràng, đúng giờ và mức giá tham khảo minh bạch %s.',
+				$from,
+				$to,
+				$price ?: 'đang cập nhật'
+			);
+			break;
+	}
+
+	$base = preg_replace( '/\s+/', ' ', trim( $base ) ) ?? trim( $base );
+	return wp_trim_words( $base, 34, '' );
+	/* legacy block removed:
+	$from     = trim( (string) ( $route['from_city'] ?? '' ) );
+	$to       = trim( (string) ( $route['to_city'] ?? '' ) );
+	$distance = trim( (string) ( $route['distance_km'] ?? '' ) );
+	$duration = trim( (string) ( $route['duration_min'] ?? '' ) );
+	$price    = trim( (string) ( $route['price_display'] ?? '' ) );
+	$topic    = TopicTemplateRegistry::sanitize_topic( $topic );
+
+	$base = sprintf(
+		'Taxi %s đi %s, quãng đường khoảng %s km, thời gian tham khảo %s phút, giá tham khảo %s. Đặt xe riêng linh hoạt, phù hợp đi công tác và gia đình.',
+		$from,
+		$to,
+		$distance ?: 'đang cập nhật',
+		$duration ?: 'đang cập nhật',
+		$price ?: 'đang cập nhật'
+	);
+
+	switch ( $topic ) {
+		case 'airport_route':
+			$base = sprintf(
+				'Taxi %s đi %s phù hợp khách cần đúng giờ bay, có hành lý và cần đón trả tận nơi. Giá tham khảo %s.',
+				$from,
+				$to,
+				$price ?: 'đang cập nhật'
+			);
+			break;
+		case 'hospital_route':
+			$base = sprintf(
+				'Taxi %s đi %s phù hợp khách đi khám bệnh, người lớn tuổi hoặc cần đến bệnh viện sớm. Thời gian tham khảo %s phút, giá từ %s.',
+				$from,
+				$to,
+				$duration ?: 'đang cập nhật',
+				$price ?: 'đang cập nhật'
+			);
+			break;
+		case 'business_trip':
+			$base = sprintf(
+				'Taxi %s đi %s dành cho khách công tác cần lịch trình rõ ràng, đúng giờ và mức giá tham khảo minh bạch %s.',
+				$from,
+				$to,
+				$price ?: 'đang cập nhật'
+			);
+			break;
+	}
+
+	$base = preg_replace( '/\s+/', ' ', trim( $base ) ) ?? trim( $base );
+	return wp_trim_words( $base, 34, '' );
 		$from     = trim( (string) ( $route['from_city'] ?? '' ) );
 		$to       = trim( (string) ( $route['to_city'] ?? '' ) );
 		$distance = trim( (string) ( $route['distance_km'] ?? '' ) );
@@ -672,6 +804,7 @@ final class ContentGenerator {
 
 		$base = preg_replace( '/\s+/', ' ', trim( $base ) ) ?? trim( $base );
 		return wp_trim_words( $base, 30, '' );
+	*/
 	}
 
 	private static function build_manual_article_html( array $route, string $topic = 'route_landing', array $length_profile = [], array $context = [] ): string {
@@ -862,16 +995,22 @@ final class ContentGenerator {
 		);
 
 		$content = implode( "\n", $body_parts );
-		$target  = max( 900, (int) ( $length_profile['min'] ?? 900 ) + 180 );
+		$target  = max( 900, (int) ( $length_profile['min'] ?? 900 ) + 60 );
 		$sentences = [
-			sprintf( 'Thuc te, khach di tuyen %s di %s thuong can mot bai viet de hieu, co so lieu ro rang va khong lan man.', $from, $to ),
-			sprintf( 'Ban co the xem gia tham khao la moc ban dau, con cuoc cuoi cung se phu thuoc vao xe, gio di va yeu cau phat sinh.', ),
-			sprintf( 'Neu di cung nguoi than, viec co xe rieng giup hanh trinh thoa mai hon va de dung nhung luc can nghi yen tam.', ),
-			sprintf( 'Voi khach di cong tac, dieu quan trong la dung gio va co len lich ro rang, hon la chon mot bai viet qua quang cao.', ),
+			sprintf( 'Thực tế, khách đi tuyến %s đi %s thường cần thông tin rõ ràng để chủ động lịch trình.', $from, $to ),
+			'Mức giá hiển thị nên được xem là tham khảo ban đầu trước khi chốt theo điểm đón thực tế.',
+			'Nếu đi cùng gia đình hoặc có nhiều hành lý, xe riêng giúp hành trình thoải mái hơn.',
+			'Khách đi công tác thường ưu tiên đúng giờ và quy trình xác nhận rõ ràng.',
+			'Đi sớm hoặc đi đêm nên báo trước để sắp xếp xe phù hợp và tránh cập rập.',
+			'Trong giờ cao điểm, thời gian đón có thể thay đổi nên cần thêm thời gian dự phòng.',
+			'Bài viết này ưu tiên thông tin thực tế thay vì dùng các đoạn quảng cáo dài.',
+			'Bạn có thể đối chiếu thêm các tuyến tương tự để chọn phương án phù hợp nhất.',
+			'Nếu cần xuất hóa đơn hoặc có điểm ghé, nên thông báo ngay từ đầu để báo giá chính xác.',
+			'Lộ trình cụ thể và loại xe lựa chọn là hai yếu tố ảnh hưởng lớn nhất đến chi phí cuối cùng.',
 		];
 		$counter = 0;
-		while ( self::count_words_plain( $content ) < $target && $counter < 10 ) {
-			$content .= "\n<p>" . esc_html( $sentences[ $counter % count( $sentences ) ] ) . '</p>';
+		while ( self::count_words_plain( $content ) < $target && $counter < count( $sentences ) ) {
+			$content .= "\n<p>" . esc_html( $sentences[ $counter ] ) . '</p>';
 			$counter++;
 		}
 
@@ -969,14 +1108,19 @@ final class ContentGenerator {
 			. '- cta_style: ' . (string) ( $meta['cta_style'] ?? '' ) . "\n"
 			. '- route_context: ' . (string) ( $route['from_city'] ?? '' ) . ' -> ' . (string) ( $route['to_city'] ?? '' ) . "\n"
 			. '- topic_profile: ' . $profile . "\n"
+			. "- strict_vietnamese: Toàn bộ nội dung phải là tiếng Việt có dấu Unicode UTF-8.\n"
+			. "- anti_repetition: Không lặp đoạn, không lặp ý, không dùng filler để tăng độ dài.\n"
 			. "Rules:\n"
-			. "0) Bat buoc viet tieng Viet co dau day du, khong duoc bo dau, khong duoc tra ve ASCII-only.\n"
+			. "0) Bắt buộc viết tiếng Việt có dấu chuẩn Unicode UTF-8, không được bỏ dấu, không được romanize.\n"
+			. "0.1) Nếu phát hiện bất kỳ đoạn tiếng Việt không dấu trong title, heading, meta, paragraph, FAQ thì output không hợp lệ và phải tự viết lại trước khi trả JSON.\n"
 			. "1) Keep tone natural, local, and practical.\n"
 			. "2) Vary section order and transition language by topic. Do not reuse the same intro for every route.\n"
 			. "3) Mention only facts present in route data. If a fact is missing, phrase it as an estimate or omit it.\n"
 			. "4) Avoid opening every section with the same phrase.\n"
 			. "5) Do not output markdown fences or extra commentary outside JSON when JSON is requested.\n"
-			. "6) Avoid generic sales phrases and repetitive transitions.\n";
+			. "6) Avoid generic sales phrases and repetitive transitions.\n"
+			. "7) Không lặp lại cùng một ý hoặc cùng một đoạn trong nhiều section. Nếu thiếu dữ liệu, viết ngắn lại thay vì lặp filler.\n"
+			. "8) Trước khi trả JSON, tự kiểm tra và xóa mọi đoạn bị lặp. Nếu cần tăng độ dài, bổ sung thông tin thực tế theo section, không lặp câu.\n";
 	}
 
 	private static function topic_profile_guidance( string $topic, array $route ): string {
@@ -1073,29 +1217,33 @@ final class ContentGenerator {
 		return implode( ' -> ', $sections );
 	}
 
-	private static function remove_broken_faq_markup( string $content ): string {
-		$content = preg_replace( '/<div\s+class="faq[^>]*>[\s\S]*$/i', '', $content ) ?? $content;
-		$content = preg_replace( '/^\s*<div\s+class="faq.*$/mi', '', $content ) ?? $content;
-		$content = preg_replace( '/<h2[^>]*>.*FAQ.*<\/h2>/iu', '', $content ) ?? $content;
-		return trim( $content );
-	}
+private static function remove_broken_faq_markup( string $content ): string {
+	$content = preg_replace( '/<div\s+class="faq[^>]*>[\s\S]*$/i', '', $content ) ?? $content;
+	$content = preg_replace( '/<div\s+class="srt-faq[^>]*>[\s\S]*?<\/div>/is', '', $content ) ?? $content;
+	$content = preg_replace( '/^\s*<div\s+class="faq.*$/mi', '', $content ) ?? $content;
+	$content = preg_replace( '/<h2[^>]*>\s*(faq|câu hỏi thường gặp|cau hoi thuong gap)\s*<\/h2>/iu', '', $content ) ?? $content;
+	return trim( $content );
+}
 
-	private static function append_structured_faq_html( string $content, array $faq ): string {
-		if ( empty( $faq ) ) {
-			return $content;
-		}
-		$html = "\n\n<h2>FAQ</h2>\n<div class=\"srt-faq\">\n";
-		foreach ( $faq as $item ) {
-			$q = esc_html( (string) ( $item['question'] ?? '' ) );
-			$a = esc_html( (string) ( $item['answer'] ?? '' ) );
-			if ( '' === $q || '' === $a ) {
-				continue;
-			}
-			$html .= "<details><summary>{$q}</summary><p>{$a}</p></details>\n";
-		}
-		$html .= "</div>\n";
-		return trim( $content ) . $html;
+private static function append_structured_faq_html( string $content, array $faq ): string {
+	if ( empty( $faq ) ) {
+		return $content;
 	}
+	if ( preg_match( '/<div[^>]+class="[^"]*srt-faq/i', $content ) ) {
+		return $content;
+	}
+	$html = "\n\n<h2>Câu hỏi thường gặp</h2>\n<div class=\"srt-faq\">\n";
+	foreach ( $faq as $item ) {
+		$q = esc_html( (string) ( $item['question'] ?? '' ) );
+		$a = esc_html( (string) ( $item['answer'] ?? '' ) );
+		if ( '' === $q || '' === $a ) {
+			continue;
+		}
+		$html .= "<details><summary>{$q}</summary><p>{$a}</p></details>\n";
+	}
+	$html .= "</div>\n";
+	return trim( $content ) . $html;
+}
 
 	private static function maybe_restore_vietnamese_diacritics( string $content, array $route, array $context = [] ): string {
 		$content = trim( $content );
@@ -1109,13 +1257,16 @@ final class ContentGenerator {
 			return $content;
 		}
 
-		$config = AIConfig::get();
-		if ( empty( $config['enable_content'] ) ) {
+		$config = AIRuntimeConfig::get();
+		if ( empty( $config['enable_content_generation'] ) ) {
 			return $content;
 		}
 
-		$prompt = "Hay viet lai doan HTML sau sang tieng Viet co dau day du, giu nguyen y nghia, giu nguyen cau truc HTML, khong them y moi, khong doi so lieu, khong output markdown hay code fence. Chi tra ve HTML.\n\n"
+		$prompt = "Hãy viết lại đoạn HTML sau sang tiếng Việt có dấu chuẩn Unicode UTF-8, giữ nguyên ý nghĩa, giữ nguyên cấu trúc HTML, không thêm ý mới, không đổi số liệu, không output markdown hay code fence. Chỉ trả về HTML.\n\n"
 			. "Route: " . (string) ( $route['from_city'] ?? '' ) . ' -> ' . (string) ( $route['to_city'] ?? '' ) . "\n\n"
+			. $content;
+		$prompt = "Hãy viết lại đoạn HTML sau sang tiếng Việt có dấu chuẩn Unicode UTF-8, giữ nguyên ý nghĩa, giữ nguyên cấu trúc HTML, không thêm ý mới, không đổi số liệu, không output markdown hay code fence. Chỉ trả về HTML.\n\n"
+			. 'Route: ' . (string) ( $route['from_city'] ?? '' ) . ' -> ' . (string) ( $route['to_city'] ?? '' ) . "\n\n"
 			. $content;
 		$response = AIService::provider()->generate_text( $prompt );
 		if ( ! empty( $response['success'] ) && ! empty( $response['content'] ) ) {
@@ -1127,7 +1278,9 @@ final class ContentGenerator {
 		return $content;
 	}
 
-	private static function contains_vietnamese_diacritics( string $content ): bool {
+private static function contains_vietnamese_diacritics( string $content ): bool {
+	return (bool) preg_match( '/[ăâêôơưđĂÂÊÔƠƯĐáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]/u', $content );
+	return (bool) preg_match( '/[ăâêôơưđĂÂÊÔƠƯĐáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]/u', $content );
 		return (bool) preg_match( '/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/iu', $content );
 	}
 
@@ -1160,7 +1313,66 @@ final class ContentGenerator {
 		return false;
 	}
 
-	private static function normalize_common_vietnamese_phrases( string $content ): string {
+private static function normalize_common_vietnamese_phrases( string $content ): string {
+	$replacements = [
+		'/\bTuyen\b/u' => 'Tuyến',
+		'/\bQuang duong\b/u' => 'Quãng đường',
+		'/\bGia taxi\b/u' => 'Giá taxi',
+		'/\bGia hien\b/u' => 'Giá hiện',
+		'/\bGia co the\b/u' => 'Giá có thể',
+		'/\bGia\b/u' => 'Giá',
+		'/\bThoi gian\b/u' => 'Thời gian',
+		'/\bKhach\b/u' => 'Khách',
+		'/\bBenh vien\b/u' => 'Bệnh viện',
+		'/\bSan bay\b/u' => 'Sân bay',
+		'/\bDat xe\b/u' => 'Đặt xe',
+		'/\bGiu lich\b/u' => 'Giữ lịch',
+		'/\bDiem don\b/u' => 'Điểm đón',
+		'/\bDiem tra\b/u' => 'Điểm trả',
+		'/\bNguoi lon tuoi\b/u' => 'Người lớn tuổi',
+		'/\bTre nho\b/u' => 'Trẻ nhỏ',
+		'/\bGia dinh\b/u' => 'Gia đình',
+		'/\bCong tac\b/u' => 'Công tác',
+		'/\bThoai mai\b/u' => 'Thoải mái',
+		'/\bHanh ly\b/u' => 'Hành lý',
+		'/\bChu dong\b/u' => 'Chủ động',
+		'/\bTham khao\b/u' => 'tham khảo',
+		'/\bPhu hop\b/u' => 'phù hợp',
+		'/\bLien he\b/u' => 'liên hệ',
+		'/\bChot lich\b/u' => 'chốt lịch',
+		'/\bLich trinh\b/u' => 'lịch trình',
+	];
+	return preg_replace( array_keys( $replacements ), array_values( $replacements ), $content ) ?? $content;
+	$replacements_clean = [
+		'/\bTuyen\b/u' => 'Tuyến',
+		'/\bQuang duong\b/u' => 'Quãng đường',
+		'/\bGia taxi\b/u' => 'Giá taxi',
+		'/\bGia hien\b/u' => 'Giá hiện',
+		'/\bGia co the\b/u' => 'Giá có thể',
+		'/\bGia\b/u' => 'Giá',
+		'/\bThoi gian\b/u' => 'Thời gian',
+		'/\bKhach\b/u' => 'Khách',
+		'/\bBenh vien\b/u' => 'Bệnh viện',
+		'/\bSan bay\b/u' => 'Sân bay',
+		'/\bDat xe\b/u' => 'Đặt xe',
+		'/\bGiu lich\b/u' => 'Giữ lịch',
+		'/\bDiem don\b/u' => 'Điểm đón',
+		'/\bDiem tra\b/u' => 'Điểm trả',
+		'/\bNguoi lon tuoi\b/u' => 'Người lớn tuổi',
+		'/\bTre nho\b/u' => 'Trẻ nhỏ',
+		'/\bGia dinh\b/u' => 'Gia đình',
+		'/\bCong tac\b/u' => 'Công tác',
+		'/\bThoai mai\b/u' => 'Thoải mái',
+		'/\bHanh ly\b/u' => 'Hành lý',
+		'/\bChu dong\b/u' => 'Chủ động',
+		'/\bTham khao\b/u' => 'tham khảo',
+		'/\bPhu hop\b/u' => 'phù hợp',
+		'/\bLien he\b/u' => 'liên hệ',
+		'/\bChot lich\b/u' => 'chốt lịch',
+		'/\bLich trinh\b/u' => 'lịch trình',
+	];
+	$content = preg_replace( array_keys( $replacements_clean ), array_values( $replacements_clean ), $content ) ?? $content;
+	return $content;
 		$replacements = [
 			'/\bTuyen\b/u' => 'Tuyến',
 			'/\bQuang duong\b/u' => 'Quãng đường',

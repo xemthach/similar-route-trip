@@ -10,6 +10,8 @@ declare( strict_types=1 );
 namespace SimilarRouteTrip\Admin;
 
 use SimilarRouteTrip\AI\AIConfig;
+use SimilarRouteTrip\AI\ContentProviderRegistry;
+use SimilarRouteTrip\AI\ImageProviderRegistry;
 use SimilarRouteTrip\AI\AIKeyVault;
 use SimilarRouteTrip\AI\AIService;
 use SimilarRouteTrip\Content\ContentGenerator;
@@ -18,9 +20,15 @@ use SimilarRouteTrip\Content\ContentRepair;
 use SimilarRouteTrip\Content\PromptTemplateManager;
 use SimilarRouteTrip\Content\TopicTemplateRegistry;
 use SimilarRouteTrip\Database\RouteRepository;
+use SimilarRouteTrip\Image\SRT_Image_Manager;
+use SimilarRouteTrip\Image\SRT_Image_Source_Config;
 use SimilarRouteTrip\Logging\LogRepository;
+use SimilarRouteTrip\Queue\JobRepository;
+use SimilarRouteTrip\Queue\QueueManager;
 use SimilarRouteTrip\Queue\QueueRepository;
+use SimilarRouteTrip\Queue\QueueWorkerConfig;
 use SimilarRouteTrip\Queue\QueueRunner;
+use SimilarRouteTrip\Queue\Worker;
 use SimilarRouteTrip\Routes\RouteCreator;
 use SimilarRouteTrip\Routes\RouteImporter;
 use SimilarRouteTrip\SEO\PromptBuilder;
@@ -38,6 +46,7 @@ final class AdminMenu {
 		add_action( 'admin_post_srt_import_tre', [ self::class, 'handle_import_tre' ] );
 		add_action( 'admin_post_srt_sync_prices', [ self::class, 'handle_sync_prices' ] );
 		add_action( 'admin_post_srt_save_ai_settings', [ self::class, 'handle_save_ai_settings' ] );
+		add_action( 'admin_post_srt_save_image_sources', [ self::class, 'handle_save_image_sources' ] );
 		add_action( 'admin_post_srt_test_ai', [ self::class, 'handle_test_ai' ] );
 		add_action( 'admin_post_srt_test_ai_keys', [ self::class, 'handle_test_ai_keys' ] );
 		add_action( 'admin_post_srt_test_ai_key', [ self::class, 'handle_test_ai_key' ] );
@@ -52,6 +61,10 @@ final class AdminMenu {
 		add_action( 'admin_post_srt_retry_queue_item', [ self::class, 'handle_retry_queue_item' ] );
 		add_action( 'admin_post_srt_clear_completed_queue', [ self::class, 'handle_clear_completed_queue' ] );
 		add_action( 'admin_post_srt_repair_generated_posts', [ self::class, 'handle_repair_generated_posts' ] );
+		add_action( 'wp_ajax_srt_ai_upsert_provider', [ self::class, 'ajax_upsert_provider' ] );
+		add_action( 'wp_ajax_srt_ai_delete_provider', [ self::class, 'ajax_delete_provider' ] );
+		add_action( 'wp_ajax_srt_ai_test_provider', [ self::class, 'ajax_test_provider' ] );
+		add_action( 'wp_ajax_srt_ai_test_runtime', [ self::class, 'ajax_test_runtime' ] );
 	}
 
 	public static function enqueue_assets( string $hook ): void {
@@ -67,6 +80,8 @@ final class AdminMenu {
 				'restUrl'         => esc_url_raw( rest_url( 'similar-route-trip/v1' ) ),
 				'restNonce'       => wp_create_nonce( 'wp_rest' ),
 				'previewEndpoint' => 'content/generate-preview',
+				'ajaxUrl'         => esc_url_raw( admin_url( 'admin-ajax.php' ) ),
+				'adminNonce'      => wp_create_nonce( self::NONCE ),
 			]
 		);
 	}
@@ -87,8 +102,9 @@ final class AdminMenu {
 		add_submenu_page( 'similar-route-trip', __( 'Content Generator', 'similar-route-trip' ), __( 'Content Generator', 'similar-route-trip' ), 'manage_options', 'srt-content-generator', [ self::class, 'render_content_generator' ] );
 		add_submenu_page( 'similar-route-trip', __( 'Prompt Templates', 'similar-route-trip' ), __( 'Prompt Templates', 'similar-route-trip' ), 'manage_options', 'srt-prompt-templates', [ self::class, 'render_prompt_templates' ] );
 		add_submenu_page( 'similar-route-trip', __( 'AI Settings', 'similar-route-trip' ), __( 'AI Settings', 'similar-route-trip' ), 'manage_options', 'srt-ai-settings', [ self::class, 'render_ai_settings' ] );
+		add_submenu_page( 'similar-route-trip', __( 'Image Sources', 'similar-route-trip' ), __( 'Image Sources', 'similar-route-trip' ), 'manage_options', 'srt-image-sources', [ self::class, 'render_image_sources' ] );
 		add_submenu_page( 'similar-route-trip', __( 'Logs', 'similar-route-trip' ), __( 'Logs', 'similar-route-trip' ), 'manage_options', 'srt-logs', [ self::class, 'render_logs' ] );
-		add_submenu_page( 'similar-route-trip', __( 'Tools', 'similar-route-trip' ), __( 'Tools', 'similar-route-trip' ), 'manage_options', 'srt-tools', [ self::class, 'render_tools' ] );
+		add_submenu_page( 'similar-route-trip', __( 'Queue / Workers', 'similar-route-trip' ), __( 'Queue / Workers', 'similar-route-trip' ), 'manage_options', 'srt-tools', [ self::class, 'render_tools' ] );
 	}
 
 	public static function render_routes(): void {
@@ -153,13 +169,15 @@ final class AdminMenu {
 
 	public static function render_ai_settings(): void {
 		self::guard();
-		$settings = AIConfig::get();
-		$keys     = AIConfig::keys( false, false );
+		$settings          = AIConfig::get();
+		$keys              = AIConfig::keys( false, false );
+		$provider_summaries = self::ai_provider_summaries();
 		self::header( __( 'AI Settings', 'similar-route-trip' ), 'srt-ai-settings' );
 		?>
+		<div id="srt-ai-settings-page" class="srt-ai-settings-page" data-nonce="<?php echo esc_attr( wp_create_nonce( self::NONCE ) ); ?>">
 		<div class="srt-card">
-		<h2>Global AI Settings</h2>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+		<h2>Runtime Settings</h2>
+		<form id="srt-runtime-settings-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 			<?php wp_nonce_field( self::NONCE ); ?>
 			<input type="hidden" name="action" value="srt_save_ai_settings">
 			<input type="hidden" name="selected_content_model" value="<?php echo esc_attr( (string) $settings['selected_content_model'] ); ?>">
@@ -192,6 +210,18 @@ final class AdminMenu {
 					<label><input type="checkbox" name="enable_auto_post" value="1" <?php checked( $settings['enable_auto_post'] ); ?>> Enable auto post creation</label><br>
 					<label><input type="checkbox" name="enable_featured_image" value="1" <?php checked( $settings['enable_featured_image'] ); ?>> Enable auto featured image</label>
 				</td></tr>
+				<tr><th>Image source mode</th><td><select name="image_source_mode"><option value="disabled" <?php selected( $settings['image_source_mode'] ?? 'disabled', 'disabled' ); ?>>Disabled</option><option value="ai_generated" <?php selected( $settings['image_source_mode'] ?? '', 'ai_generated' ); ?>>AI Generated</option><option value="free_stock" <?php selected( $settings['image_source_mode'] ?? '', 'free_stock' ); ?>>Free Stock API</option><option value="mixed_ai_first" <?php selected( $settings['image_source_mode'] ?? '', 'mixed_ai_first' ); ?>>Mixed: AI first, stock fallback</option><option value="mixed_stock_first" <?php selected( $settings['image_source_mode'] ?? '', 'mixed_stock_first' ); ?>>Stock first, AI fallback</option></select></td></tr>
+				<tr><th>Number of images per post</th><td><select name="images_per_post"><option value="0" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), '0' ); ?>>0</option><option value="1" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), '1' ); ?>>1</option><option value="2" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), '2' ); ?>>2</option><option value="3" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), '3' ); ?>>3</option><option value="5" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), '5' ); ?>>5</option><option value="custom" <?php selected( (string) ( $settings['images_per_post'] ?? '1' ), 'custom' ); ?>>custom</option></select> <input type="number" min="0" max="8" name="images_per_post_custom" value="<?php echo esc_attr( (string) ( $settings['images_per_post_custom'] ?? 1 ) ); ?>" style="width:90px;"></td></tr>
+				<tr><th>Featured image mode</th><td><select name="featured_image_mode"><option value="first_generated" <?php selected( $settings['featured_image_mode'] ?? 'first_generated', 'first_generated' ); ?>>First generated image</option><option value="best_matched" <?php selected( $settings['featured_image_mode'] ?? '', 'best_matched' ); ?>>Best matched image</option><option value="manual_only" <?php selected( $settings['featured_image_mode'] ?? '', 'manual_only' ); ?>>Manual only</option><option value="disabled" <?php selected( $settings['featured_image_mode'] ?? '', 'disabled' ); ?>>Disabled</option></select></td></tr>
+				<tr><th>Insert content images</th><td><label><input type="checkbox" name="insert_images_into_content" value="1" <?php checked( ! empty( $settings['insert_images_into_content'] ) ); ?>> Insert images into article content</label></td></tr>
+				<tr><th>Image placement</th><td><select name="image_placement"><option value="after_intro" <?php selected( $settings['image_placement'] ?? 'after_intro', 'after_intro' ); ?>>after intro</option><option value="before_first_h2" <?php selected( $settings['image_placement'] ?? '', 'before_first_h2' ); ?>>before first H2</option><option value="after_every_n_headings" <?php selected( $settings['image_placement'] ?? '', 'after_every_n_headings' ); ?>>after every N headings</option><option value="end_of_article" <?php selected( $settings['image_placement'] ?? '', 'end_of_article' ); ?>>end of article</option><option value="shortcode_placeholder" <?php selected( $settings['image_placement'] ?? '', 'shortcode_placeholder' ); ?>>shortcode placeholder</option></select> Every <input type="number" min="1" max="10" name="image_heading_interval" value="<?php echo esc_attr( (string) ( $settings['image_heading_interval'] ?? 2 ) ); ?>" style="width:70px;"> headings</td></tr>
+				<tr><th>Image size</th><td><select name="image_size"><option value="1024x576" <?php selected( $settings['image_size'] ?? '1024x576', '1024x576' ); ?>>1024x576</option><option value="1200x675" <?php selected( $settings['image_size'] ?? '', '1200x675' ); ?>>1200x675</option><option value="1024x1024" <?php selected( $settings['image_size'] ?? '', '1024x1024' ); ?>>1024x1024</option><option value="custom" <?php selected( $settings['image_size'] ?? '', 'custom' ); ?>>custom</option></select> <input type="text" name="image_size_custom" value="<?php echo esc_attr( (string) ( $settings['image_size_custom'] ?? '' ) ); ?>" placeholder="1400x788"></td></tr>
+				<tr><th>Image style</th><td><select name="image_style"><option value="realistic" <?php selected( $settings['image_style'] ?? 'realistic', 'realistic' ); ?>>realistic</option><option value="local_travel" <?php selected( $settings['image_style'] ?? '', 'local_travel' ); ?>>local travel</option><option value="taxi_service" <?php selected( $settings['image_style'] ?? '', 'taxi_service' ); ?>>taxi service</option><option value="documentary" <?php selected( $settings['image_style'] ?? '', 'documentary' ); ?>>documentary</option><option value="clean_banner" <?php selected( $settings['image_style'] ?? '', 'clean_banner' ); ?>>clean website banner</option><option value="custom" <?php selected( $settings['image_style'] ?? '', 'custom' ); ?>>custom</option></select> <input type="text" name="image_style_custom" value="<?php echo esc_attr( (string) ( $settings['image_style_custom'] ?? '' ) ); ?>" placeholder="custom style"></td></tr>
+				<tr><th>Image API format</th><td><select name="image_api_format"><option value="openai_images" <?php selected( $settings['image_api_format'] ?? 'openai_images', 'openai_images' ); ?>>OpenAI-compatible Images API</option><option value="google_genai_image" <?php selected( $settings['image_api_format'] ?? '', 'google_genai_image' ); ?>>Google GenAI image response</option></select></td></tr>
+				<tr><th>Image endpoint</th><td><input type="text" class="regular-text" name="image_endpoint" value="<?php echo esc_attr( (string) ( $settings['image_endpoint'] ?? '/images/generations' ) ); ?>"> Edit endpoint <input type="text" class="regular-text" name="image_edit_endpoint" value="<?php echo esc_attr( (string) ( $settings['image_edit_endpoint'] ?? '/images/edits' ) ); ?>"></td></tr>
+				<tr><th>Image response</th><td><select name="image_response_format"><option value="auto" <?php selected( $settings['image_response_format'] ?? 'auto', 'auto' ); ?>>auto</option><option value="url" <?php selected( $settings['image_response_format'] ?? '', 'url' ); ?>>url</option><option value="b64_json" <?php selected( $settings['image_response_format'] ?? '', 'b64_json' ); ?>>b64_json</option></select> <select name="image_quality"><option value="standard" <?php selected( $settings['image_quality'] ?? 'standard', 'standard' ); ?>>standard</option><option value="high" <?php selected( $settings['image_quality'] ?? '', 'high' ); ?>>high</option><option value="low" <?php selected( $settings['image_quality'] ?? '', 'low' ); ?>>low</option><option value="auto" <?php selected( $settings['image_quality'] ?? '', 'auto' ); ?>>auto</option></select> <input type="text" name="image_style_preset" value="<?php echo esc_attr( (string) ( $settings['image_style_preset'] ?? '' ) ); ?>" placeholder="style preset"></td></tr>
+				<tr><th>Alt text mode</th><td><select name="alt_text_mode"><option value="ai-generated" <?php selected( $settings['alt_text_mode'] ?? '', 'ai-generated' ); ?>>AI generated</option><option value="route-based" <?php selected( $settings['alt_text_mode'] ?? 'route-based', 'route-based' ); ?>>route-based</option><option value="title-based" <?php selected( $settings['alt_text_mode'] ?? '', 'title-based' ); ?>>title-based</option></select></td></tr>
+				<tr><th>Image safety</th><td><label><input type="checkbox" name="overwrite_existing_images" value="1" <?php checked( ! empty( $settings['overwrite_existing_images'] ) ); ?>> Overwrite existing images</label><br><label><input type="checkbox" name="save_image_prompt_to_meta" value="1" <?php checked( ! empty( $settings['save_image_prompt_to_meta'] ) ); ?>> Save image prompt to post meta</label></td></tr>
 			</table>
 			<?php submit_button( __( 'Save AI Settings', 'similar-route-trip' ) ); ?>
 		</form>
@@ -199,111 +229,92 @@ final class AdminMenu {
 
 		<div class="srt-card">
 			<h2>Provider Registry</h2>
-			<p class="description">Add, edit, test, and delete providers from one registry. Global settings stay separate from provider credentials.</p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-				<?php wp_nonce_field( self::NONCE ); ?>
-				<input type="hidden" name="action" value="srt_save_ai_settings">
-				<input type="hidden" name="mode" value="<?php echo esc_attr( (string) $settings['mode'] ); ?>">
-				<input type="hidden" name="active_key_id" value="<?php echo esc_attr( (string) $settings['active_key_id'] ); ?>">
-				<input type="hidden" name="selected_content_model" value="<?php echo esc_attr( (string) $settings['selected_content_model'] ); ?>">
-				<input type="hidden" name="selected_image_model" value="<?php echo esc_attr( (string) $settings['selected_image_model'] ); ?>">
-				<input type="hidden" name="temperature" value="<?php echo esc_attr( (string) $settings['temperature'] ); ?>">
-				<input type="hidden" name="max_tokens" value="<?php echo esc_attr( (string) $settings['max_tokens'] ); ?>">
-				<input type="hidden" name="timeout" value="<?php echo esc_attr( (string) $settings['timeout'] ); ?>">
-				<input type="hidden" name="enable_content" value="<?php echo ! empty( $settings['enable_content'] ) ? '1' : '0'; ?>">
-				<input type="hidden" name="enable_image" value="<?php echo ! empty( $settings['enable_image'] ) ? '1' : '0'; ?>">
-				<input type="hidden" name="enable_auto_post" value="<?php echo ! empty( $settings['enable_auto_post'] ) ? '1' : '0'; ?>">
-				<input type="hidden" name="enable_featured_image" value="<?php echo ! empty( $settings['enable_featured_image'] ) ? '1' : '0'; ?>">
-				<table class="widefat striped srt-provider-table">
-					<thead><tr><th>Enable</th><th>Label</th><th>Provider type</th><th>Base URL</th><th>API Key</th><th>Content model</th><th>Image model</th><th>Priority</th><th>Weight</th><th>Status</th><th>Actions</th></tr></thead>
-					<tbody>
-					<tr class="srt-provider-add-toggle-row">
-						<td colspan="11">
-							<button type="button" class="button button-primary srt-toggle-provider-editor" data-target="#srt-provider-add-row">Add Provider</button>
-						</td>
-					</tr>
-					<tr id="srt-provider-add-row" class="srt-provider-editor-row" hidden>
-						<td><input type="checkbox" checked disabled></td>
-						<td><input type="text" class="regular-text" name="new_key[label]" placeholder="shop-main"></td>
-						<td>
-							<select name="new_key[provider]">
-								<option value="shopaikey_compatible">ShopAIKey-compatible</option>
-								<option value="openai_compatible">OpenAI-compatible</option>
-								<option value="gemini_compatible">Gemini-compatible</option>
-								<option value="custom_openai_compatible">Custom OpenAI-compatible</option>
-							</select>
-						</td>
-						<td><input type="url" class="regular-text" name="new_key[base_url]" value="https://api.shopaikey.com"></td>
-						<td><input type="password" class="regular-text" name="new_key[api_key]" autocomplete="new-password" placeholder="sk-..."></td>
-						<td><textarea rows="2" name="new_key[content_models]" placeholder="gemini-2.5-flash-lite"></textarea></td>
-						<td><textarea rows="2" name="new_key[image_models]" placeholder="gemini-2.5-flash-image"></textarea></td>
-						<td><input type="number" min="1" max="100" name="new_key[priority]" value="10" style="width:70px;"></td>
-						<td><input type="number" min="1" max="100" name="new_key[weight]" value="1" style="width:70px;"></td>
-						<td><span class="srt-status srt-status-not_tested">new</span></td>
-						<td>
-							<input type="hidden" name="new_key[enabled]" value="1">
-							<button type="submit" name="srt_ai_action" value="add_provider" class="button button-primary button-small">Save</button>
-						</td>
-					</tr>
-					<?php if ( empty( $keys ) ) : ?>
-						<tr><td colspan="11">No providers configured yet.</td></tr>
+			<p class="description">Provider CRUD va test da tach khoi Runtime Settings de tranh conflict form state.</p>
+			<div class="srt-actions-row">
+				<button type="button" class="button button-primary" id="srt-provider-add"><?php esc_html_e( 'Add Provider', 'similar-route-trip' ); ?></button>
+				<button type="button" class="button" id="srt-test-runtime-active"><?php esc_html_e( 'Test Active Runtime', 'similar-route-trip' ); ?></button>
+				<button type="button" class="button" id="srt-test-runtime-all"><?php esc_html_e( 'Test All Providers', 'similar-route-trip' ); ?></button>
+			</div>
+			<div id="srt-ai-runtime-test-result" class="notice inline" style="display:none;"></div>
+			<table class="widefat striped srt-provider-table">
+				<thead><tr><th>Label</th><th>Type</th><th>Models</th><th>Priority</th><th>Usage</th><th>Status</th><th>Actions</th></tr></thead>
+				<tbody id="srt-provider-table-body">
+					<?php if ( empty( $provider_summaries ) ) : ?>
+						<tr><td colspan="7"><?php esc_html_e( 'No providers configured yet.', 'similar-route-trip' ); ?></td></tr>
+					<?php else : ?>
+						<?php foreach ( $provider_summaries as $provider ) : ?>
+							<tr data-provider-id="<?php echo esc_attr( (string) $provider['id'] ); ?>">
+								<td>
+									<strong><?php echo esc_html( (string) $provider['label'] ); ?></strong><br>
+									<small><?php echo esc_html( (string) $provider['api_key_masked'] ); ?></small>
+								</td>
+								<td><?php echo esc_html( (string) $provider['provider'] ); ?></td>
+								<td>
+									<?php if ( '' !== (string) $provider['content_models_preview'] ) : ?>
+										<div><strong>Content:</strong> <?php echo esc_html( (string) $provider['content_models_preview'] ); ?></div>
+									<?php endif; ?>
+									<?php if ( '' !== (string) $provider['image_models_preview'] ) : ?>
+										<div><strong>Image:</strong> <?php echo esc_html( (string) $provider['image_models_preview'] ); ?></div>
+									<?php endif; ?>
+								</td>
+								<td><?php echo esc_html( (string) $provider['priority'] ); ?></td>
+								<td><?php echo ! empty( $provider['enabled'] ) ? 'Enabled' : 'Disabled'; ?> - W<?php echo esc_html( (string) $provider['weight'] ); ?></td>
+								<td>
+									<span class="srt-status srt-status-<?php echo esc_attr( sanitize_html_class( (string) $provider['last_status'] ) ); ?>"><?php echo esc_html( (string) $provider['last_status'] ); ?></span>
+									<?php if ( '' !== (string) $provider['last_checked'] ) : ?>
+										<br><small><?php echo esc_html( (string) $provider['last_checked'] ); ?></small>
+									<?php endif; ?>
+									<?php if ( '' !== (string) $provider['last_message'] ) : ?>
+										<br><small><?php echo esc_html( (string) $provider['last_message'] ); ?></small>
+									<?php endif; ?>
+								</td>
+								<td>
+									<button type="button" class="button button-small srt-provider-edit" data-provider="<?php echo esc_attr( wp_json_encode( $provider['edit_payload'] ) ); ?>"><?php esc_html_e( 'Edit', 'similar-route-trip' ); ?></button>
+									<button type="button" class="button button-small srt-provider-test" data-provider-id="<?php echo esc_attr( (string) $provider['id'] ); ?>"><?php esc_html_e( 'Test', 'similar-route-trip' ); ?></button>
+									<button type="button" class="button button-small srt-provider-delete" data-provider-id="<?php echo esc_attr( (string) $provider['id'] ); ?>"><?php esc_html_e( 'Delete', 'similar-route-trip' ); ?></button>
+								</td>
+							</tr>
+						<?php endforeach; ?>
 					<?php endif; ?>
-					<?php foreach ( $keys as $index => $key ) : ?>
-						<tr>
-							<td><?php echo ! empty( $key['enabled'] ) ? 'Yes' : 'No'; ?></td>
-							<td>
-								<strong><?php echo esc_html( (string) ( $key['label'] ?? $key['id'] ?? '' ) ); ?></strong>
-							</td>
-							<td><?php echo esc_html( (string) ( $key['provider'] ?? '' ) ); ?></td>
-							<td><?php echo esc_html( (string) ( $key['base_url'] ?? '' ) ); ?></td>
-							<td><code><?php echo esc_html( AIKeyVault::mask( (string) ( $key['api_key'] ?? '' ) ) ); ?></code></td>
-							<td><?php echo esc_html( implode( ', ', (array) ( $key['content_models'] ?? [] ) ) ); ?></td>
-							<td><?php echo esc_html( implode( ', ', (array) ( $key['image_models'] ?? [] ) ) ); ?></td>
-							<td><?php echo esc_html( (string) ( $key['priority'] ?? 10 ) ); ?></td>
-							<td><?php echo esc_html( (string) ( $key['weight'] ?? 1 ) ); ?></td>
-							<td>
-								<span class="srt-status srt-status-<?php echo esc_attr( sanitize_html_class( (string) ( $key['last_status'] ?? 'not_tested' ) ) ); ?>"><?php echo esc_html( (string) ( $key['last_status'] ?? 'not_tested' ) ); ?></span><br>
-								<small><?php echo esc_html( (string) ( $key['last_checked'] ?? '' ) ); ?></small>
-							</td>
-							<td>
-								<button type="button" class="button button-small srt-toggle-provider-editor" data-target="#srt-provider-edit-<?php echo esc_attr( (string) $index ); ?>">Edit</button>
-								<?php self::test_key_form( (string) ( $key['id'] ?? '' ) ); ?>
-								<?php self::delete_key_form( (string) ( $key['id'] ?? '' ) ); ?>
-							</td>
-						</tr>
-						<tr id="srt-provider-edit-<?php echo esc_attr( (string) $index ); ?>" class="srt-provider-editor-row" hidden>
-							<td><input type="checkbox" name="keys[<?php echo esc_attr( (string) $index ); ?>][enabled]" value="1" <?php checked( ! empty( $key['enabled'] ) ); ?>></td>
-							<td>
-								<input type="hidden" name="keys[<?php echo esc_attr( (string) $index ); ?>][id]" value="<?php echo esc_attr( (string) ( $key['id'] ?? '' ) ); ?>">
-								<input type="text" class="regular-text" name="keys[<?php echo esc_attr( (string) $index ); ?>][label]" value="<?php echo esc_attr( (string) ( $key['label'] ?? '' ) ); ?>">
-								<div class="description">ID: <?php echo esc_html( (string) ( $key['id'] ?? '' ) ); ?></div>
-							</td>
-							<td>
-								<select name="keys[<?php echo esc_attr( (string) $index ); ?>][provider]">
-									<option value="shopaikey_compatible" <?php selected( $key['provider'] ?? 'shopaikey_compatible', 'shopaikey_compatible' ); ?>>ShopAIKey-compatible</option>
-									<option value="openai_compatible" <?php selected( $key['provider'] ?? '', 'openai_compatible' ); ?>>OpenAI-compatible</option>
-									<option value="gemini_compatible" <?php selected( $key['provider'] ?? '', 'gemini_compatible' ); ?>>Gemini-compatible</option>
-									<option value="custom_openai_compatible" <?php selected( $key['provider'] ?? '', 'custom_openai_compatible' ); ?>>Custom OpenAI-compatible</option>
-								</select>
-							</td>
-							<td><input type="url" class="regular-text" name="keys[<?php echo esc_attr( (string) $index ); ?>][base_url]" value="<?php echo esc_attr( (string) ( $key['base_url'] ?? 'https://api.shopaikey.com' ) ); ?>"></td>
-							<td><input type="password" class="regular-text" name="keys[<?php echo esc_attr( (string) $index ); ?>][api_key]" value="" placeholder="<?php echo esc_attr( AIKeyVault::mask( (string) ( $key['api_key'] ?? '' ) ) ); ?>"></td>
-							<td><textarea rows="2" name="keys[<?php echo esc_attr( (string) $index ); ?>][content_models]"><?php echo esc_textarea( implode( "\n", (array) ( $key['content_models'] ?? [] ) ) ); ?></textarea></td>
-							<td><textarea rows="2" name="keys[<?php echo esc_attr( (string) $index ); ?>][image_models]"><?php echo esc_textarea( implode( "\n", (array) ( $key['image_models'] ?? [] ) ) ); ?></textarea></td>
-							<td><input type="number" min="1" max="100" name="keys[<?php echo esc_attr( (string) $index ); ?>][priority]" value="<?php echo esc_attr( (string) ( $key['priority'] ?? 10 ) ); ?>" style="width:70px;"></td>
-							<td><input type="number" min="1" max="100" name="keys[<?php echo esc_attr( (string) $index ); ?>][weight]" value="<?php echo esc_attr( (string) ( $key['weight'] ?? 1 ) ); ?>" style="width:70px;"></td>
-							<td colspan="2">Editable row</td>
-						</tr>
-					<?php endforeach; ?>
-					</tbody>
-				</table>
-				<div class="srt-actions-row">
-					<?php submit_button( __( 'Save Provider Changes', 'similar-route-trip' ), 'secondary', 'submit', false ); ?>
-				</div>
-			</form>
+				</tbody>
+			</table>
+			<script type="application/json" id="srt-provider-data"><?php echo wp_json_encode( $provider_summaries ); ?></script>
 		</div>
-		<?php self::button_form( 'srt_test_ai', __( 'Test Active Key', 'similar-route-trip' ) ); ?>
-		<?php self::button_form( 'srt_test_ai_keys', __( 'Test All Keys', 'similar-route-trip' ) ); ?>
+
+		<div class="srt-card">
+			<h2><?php esc_html_e( 'Operational Links', 'similar-route-trip' ); ?></h2>
+			<p><a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=srt-tools' ) ); ?>"><?php esc_html_e( 'Queue / Workers', 'similar-route-trip' ); ?></a> <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=srt-logs' ) ); ?>"><?php esc_html_e( 'Logs', 'similar-route-trip' ); ?></a></p>
+		</div>
+
+		<div id="srt-provider-modal" class="srt-modal" hidden>
+			<div class="srt-modal-dialog">
+				<div class="srt-modal-header">
+					<h3 id="srt-provider-modal-title"><?php esc_html_e( 'Provider', 'similar-route-trip' ); ?></h3>
+					<button type="button" class="button-link" id="srt-provider-modal-close" aria-label="<?php esc_attr_e( 'Close', 'similar-route-trip' ); ?>">&times;</button>
+				</div>
+				<form id="srt-provider-modal-form">
+					<input type="hidden" name="provider_id" id="srt-provider-id" value="">
+					<table class="form-table" role="presentation">
+						<tr><th><?php esc_html_e( 'Enabled', 'similar-route-trip' ); ?></th><td><label><input type="checkbox" id="srt-provider-enabled" name="enabled" value="1" checked> <?php esc_html_e( 'Provider enabled', 'similar-route-trip' ); ?></label></td></tr>
+						<tr><th><?php esc_html_e( 'Label', 'similar-route-trip' ); ?></th><td><input type="text" class="regular-text" id="srt-provider-label" name="label" required></td></tr>
+						<tr><th><?php esc_html_e( 'Provider type', 'similar-route-trip' ); ?></th><td><select id="srt-provider-type" name="provider"><option value="shopaikey_compatible">ShopAIKey-compatible</option><option value="openai_compatible">OpenAI-compatible</option><option value="gemini_compatible">Gemini-compatible</option><option value="custom_openai_compatible">Custom OpenAI-compatible</option></select></td></tr>
+						<tr><th><?php esc_html_e( 'Base URL', 'similar-route-trip' ); ?></th><td><input type="url" class="regular-text" id="srt-provider-base-url" name="base_url" placeholder="https://api.shopaikey.com"></td></tr>
+						<tr><th><?php esc_html_e( 'API Key', 'similar-route-trip' ); ?></th><td><input type="password" class="regular-text" id="srt-provider-api-key" name="api_key" autocomplete="new-password" placeholder="<?php esc_attr_e( 'Leave empty to keep current key', 'similar-route-trip' ); ?>"></td></tr>
+						<tr><th><?php esc_html_e( 'Content models', 'similar-route-trip' ); ?></th><td><textarea rows="3" id="srt-provider-content-models" name="content_models" placeholder="gemini-2.5-flash-lite"></textarea></td></tr>
+						<tr><th><?php esc_html_e( 'Image models', 'similar-route-trip' ); ?></th><td><textarea rows="3" id="srt-provider-image-models" name="image_models" placeholder="gemini-2.5-flash-image"></textarea></td></tr>
+						<tr><th><?php esc_html_e( 'Image endpoint', 'similar-route-trip' ); ?></th><td><input type="text" class="regular-text" id="srt-provider-image-endpoint" name="image_endpoint" value="/images/generations"> <input type="text" class="regular-text" id="srt-provider-image-edit-endpoint" name="image_edit_endpoint" value="/images/edits"></td></tr>
+						<tr><th><?php esc_html_e( 'Image API format', 'similar-route-trip' ); ?></th><td><select id="srt-provider-image-api-format" name="image_api_format"><option value="openai_images">OpenAI images</option><option value="google_genai_image">Google GenAI image</option></select></td></tr>
+						<tr><th><?php esc_html_e( 'Priority / Weight', 'similar-route-trip' ); ?></th><td><input type="number" min="1" max="100" id="srt-provider-priority" name="priority" value="10" style="width:80px;"> <input type="number" min="1" max="100" id="srt-provider-weight" name="weight" value="1" style="width:80px;"></td></tr>
+					</table>
+					<div class="srt-actions-row">
+						<button type="submit" class="button button-primary" id="srt-provider-save"><?php esc_html_e( 'Save Provider', 'similar-route-trip' ); ?></button>
+						<button type="button" class="button" id="srt-provider-cancel"><?php esc_html_e( 'Cancel', 'similar-route-trip' ); ?></button>
+					</div>
+					<div id="srt-provider-modal-message" class="notice inline" style="display:none;"></div>
+				</form>
+			</div>
+		</div>
+		</div>
 		<?php
 		self::footer();
 	}
@@ -327,6 +338,29 @@ final class AdminMenu {
 		</div>
 		<?php self::footer(); ?>
 		<?php
+	}
+
+	public static function render_image_sources(): void {
+		self::guard();
+		$settings = SRT_Image_Source_Config::get();
+		self::header( __( 'Image Sources', 'similar-route-trip' ), 'srt-image-sources' );
+		?>
+		<div class="srt-card">
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<?php wp_nonce_field( self::NONCE ); ?>
+			<input type="hidden" name="action" value="srt_save_image_sources">
+			<table class="form-table" role="presentation">
+				<tr><th>Source priority</th><td><input type="text" class="large-text" name="source_priority" value="<?php echo esc_attr( implode( ', ', (array) ( $settings['source_priority'] ?? [] ) ) ); ?>"><p class="description">Allowed: ai, unsplash, pexels, pixabay, placeholder. Recommended production order: ai, pexels, pixabay, placeholder, unsplash.</p></td></tr>
+				<tr><th>Unsplash</th><td><label><input type="checkbox" name="unsplash_enabled" value="1" <?php checked( ! empty( $settings['unsplash_enabled'] ) ); ?>> Enable experimental source</label><br><label for="srt-unsplash-access-key"><strong>Access Key</strong></label><br><input id="srt-unsplash-access-key" type="password" class="regular-text" name="unsplash_access_key" value="" placeholder="<?php echo esc_attr( AIKeyVault::mask( (string) ( $settings['unsplash_access_key'] ?? '' ) ) ); ?>"><p class="description">Use the Unsplash <strong>Access Key</strong> for server-side search requests with <code>Authorization: Client-ID ...</code>. Do not paste the Secret Key here. Secret Key is tied to OAuth-style flows and is not used by this plugin's stock search integration. Warning: Unsplash API guidelines emphasize hotlinking and download tracking; this plugin imports to Media Library, so keep Unsplash optional.</p><select name="unsplash_orientation"><option value="landscape" <?php selected( $settings['unsplash_orientation'] ?? 'landscape', 'landscape' ); ?>>landscape</option><option value="portrait" <?php selected( $settings['unsplash_orientation'] ?? '', 'portrait' ); ?>>portrait</option><option value="squarish" <?php selected( $settings['unsplash_orientation'] ?? '', 'squarish' ); ?>>squarish</option></select> <select name="unsplash_order_by"><option value="relevant" <?php selected( $settings['unsplash_order_by'] ?? 'relevant', 'relevant' ); ?>>relevant</option><option value="latest" <?php selected( $settings['unsplash_order_by'] ?? '', 'latest' ); ?>>latest</option></select> <select name="unsplash_content_filter"><option value="low" <?php selected( $settings['unsplash_content_filter'] ?? 'low', 'low' ); ?>>content low</option><option value="high" <?php selected( $settings['unsplash_content_filter'] ?? '', 'high' ); ?>>content high</option></select> <select name="unsplash_color"><option value="" <?php selected( $settings['unsplash_color'] ?? '', '' ); ?>>any color</option><option value="black_and_white" <?php selected( $settings['unsplash_color'] ?? '', 'black_and_white' ); ?>>black_and_white</option><option value="black" <?php selected( $settings['unsplash_color'] ?? '', 'black' ); ?>>black</option><option value="white" <?php selected( $settings['unsplash_color'] ?? '', 'white' ); ?>>white</option><option value="yellow" <?php selected( $settings['unsplash_color'] ?? '', 'yellow' ); ?>>yellow</option><option value="orange" <?php selected( $settings['unsplash_color'] ?? '', 'orange' ); ?>>orange</option><option value="red" <?php selected( $settings['unsplash_color'] ?? '', 'red' ); ?>>red</option><option value="purple" <?php selected( $settings['unsplash_color'] ?? '', 'purple' ); ?>>purple</option><option value="magenta" <?php selected( $settings['unsplash_color'] ?? '', 'magenta' ); ?>>magenta</option><option value="green" <?php selected( $settings['unsplash_color'] ?? '', 'green' ); ?>>green</option><option value="teal" <?php selected( $settings['unsplash_color'] ?? '', 'teal' ); ?>>teal</option><option value="blue" <?php selected( $settings['unsplash_color'] ?? '', 'blue' ); ?>>blue</option></select> <select name="unsplash_credit_mode"><option value="caption" <?php selected( $settings['unsplash_credit_mode'] ?? 'caption', 'caption' ); ?>>Caption credit</option><option value="description" <?php selected( $settings['unsplash_credit_mode'] ?? '', 'description' ); ?>>Description credit</option><option value="none" <?php selected( $settings['unsplash_credit_mode'] ?? '', 'none' ); ?>>Do not show credit text</option></select><p style="margin-top:8px;"><input type="text" class="regular-text srt-stock-query" data-provider="unsplash" placeholder="Search query preview" value="mekong delta taxi"> <button type="button" class="button srt-test-image-source" data-provider="unsplash">Test Source</button> <button type="button" class="button srt-search-image-source" data-provider="unsplash">Search Preview</button></p><div class="srt-image-source-result" id="srt-source-result-unsplash"></div></td></tr>
+				<tr><th>Pexels</th><td><label><input type="checkbox" name="pexels_enabled" value="1" <?php checked( ! empty( $settings['pexels_enabled'] ) ); ?>> Enable</label><br><label for="srt-pexels-api-key"><strong>API Key</strong></label><br><input id="srt-pexels-api-key" type="password" class="regular-text" name="pexels_api_key" value="" placeholder="<?php echo esc_attr( AIKeyVault::mask( (string) ( $settings['pexels_api_key'] ?? '' ) ) ); ?>"><p class="description">Doc-backed fields: orientation, size, color, locale. Pexels asks you to credit photographers whenever possible.</p><select name="pexels_orientation"><option value="landscape" <?php selected( $settings['pexels_orientation'] ?? 'landscape', 'landscape' ); ?>>landscape</option><option value="portrait" <?php selected( $settings['pexels_orientation'] ?? '', 'portrait' ); ?>>portrait</option><option value="square" <?php selected( $settings['pexels_orientation'] ?? '', 'square' ); ?>>square</option></select> <select name="pexels_size"><option value="large" <?php selected( $settings['pexels_size'] ?? '', 'large' ); ?>>large</option><option value="medium" <?php selected( $settings['pexels_size'] ?? 'medium', 'medium' ); ?>>medium</option><option value="small" <?php selected( $settings['pexels_size'] ?? '', 'small' ); ?>>small</option></select> <input type="text" name="pexels_color" value="<?php echo esc_attr( (string) ( $settings['pexels_color'] ?? '' ) ); ?>" placeholder="color or #ffffff"> <input type="text" name="pexels_locale" value="<?php echo esc_attr( (string) ( $settings['pexels_locale'] ?? 'en-US' ) ); ?>" placeholder="en-US"><p style="margin-top:8px;"><input type="text" class="regular-text srt-stock-query" data-provider="pexels" placeholder="Search query preview" value="mekong delta taxi"> <button type="button" class="button srt-test-image-source" data-provider="pexels">Test Source</button> <button type="button" class="button srt-search-image-source" data-provider="pexels">Search Preview</button></p><div class="srt-image-source-result" id="srt-source-result-pexels"></div></td></tr>
+				<tr><th>Pixabay</th><td><label><input type="checkbox" name="pixabay_enabled" value="1" <?php checked( ! empty( $settings['pixabay_enabled'] ) ); ?>> Enable</label><br><label for="srt-pixabay-api-key"><strong>API Key</strong></label><br><input id="srt-pixabay-api-key" type="password" class="regular-text" name="pixabay_api_key" value="" placeholder="<?php echo esc_attr( AIKeyVault::mask( (string) ( $settings['pixabay_api_key'] ?? '' ) ) ); ?>"><p class="description">Doc-backed fields: image_type, orientation, safesearch, order, category, colors, editors_choice. Pixabay search API accepts per_page from 3 to 200.</p><select name="pixabay_image_type"><option value="photo" <?php selected( $settings['pixabay_image_type'] ?? 'photo', 'photo' ); ?>>photo</option><option value="all" <?php selected( $settings['pixabay_image_type'] ?? '', 'all' ); ?>>all</option><option value="illustration" <?php selected( $settings['pixabay_image_type'] ?? '', 'illustration' ); ?>>illustration</option><option value="vector" <?php selected( $settings['pixabay_image_type'] ?? '', 'vector' ); ?>>vector</option></select> <select name="pixabay_orientation"><option value="horizontal" <?php selected( $settings['pixabay_orientation'] ?? 'horizontal', 'horizontal' ); ?>>horizontal</option><option value="vertical" <?php selected( $settings['pixabay_orientation'] ?? '', 'vertical' ); ?>>vertical</option><option value="all" <?php selected( $settings['pixabay_orientation'] ?? '', 'all' ); ?>>all</option></select> <label><input type="checkbox" name="pixabay_safesearch" value="1" <?php checked( ! empty( $settings['pixabay_safesearch'] ) ); ?>> safesearch</label> <label><input type="checkbox" name="pixabay_editors_choice" value="1" <?php checked( ! empty( $settings['pixabay_editors_choice'] ) ); ?>> editors choice</label><br><select name="pixabay_order"><option value="popular" <?php selected( $settings['pixabay_order'] ?? 'popular', 'popular' ); ?>>popular</option><option value="latest" <?php selected( $settings['pixabay_order'] ?? '', 'latest' ); ?>>latest</option></select> <select name="pixabay_category"><option value="" <?php selected( $settings['pixabay_category'] ?? '', '' ); ?>>all categories</option><option value="backgrounds" <?php selected( $settings['pixabay_category'] ?? '', 'backgrounds' ); ?>>backgrounds</option><option value="fashion" <?php selected( $settings['pixabay_category'] ?? '', 'fashion' ); ?>>fashion</option><option value="nature" <?php selected( $settings['pixabay_category'] ?? '', 'nature' ); ?>>nature</option><option value="science" <?php selected( $settings['pixabay_category'] ?? '', 'science' ); ?>>science</option><option value="education" <?php selected( $settings['pixabay_category'] ?? '', 'education' ); ?>>education</option><option value="feelings" <?php selected( $settings['pixabay_category'] ?? '', 'feelings' ); ?>>feelings</option><option value="health" <?php selected( $settings['pixabay_category'] ?? '', 'health' ); ?>>health</option><option value="people" <?php selected( $settings['pixabay_category'] ?? '', 'people' ); ?>>people</option><option value="religion" <?php selected( $settings['pixabay_category'] ?? '', 'religion' ); ?>>religion</option><option value="places" <?php selected( $settings['pixabay_category'] ?? '', 'places' ); ?>>places</option><option value="animals" <?php selected( $settings['pixabay_category'] ?? '', 'animals' ); ?>>animals</option><option value="industry" <?php selected( $settings['pixabay_category'] ?? '', 'industry' ); ?>>industry</option><option value="computer" <?php selected( $settings['pixabay_category'] ?? '', 'computer' ); ?>>computer</option><option value="food" <?php selected( $settings['pixabay_category'] ?? '', 'food' ); ?>>food</option><option value="sports" <?php selected( $settings['pixabay_category'] ?? '', 'sports' ); ?>>sports</option><option value="transportation" <?php selected( $settings['pixabay_category'] ?? '', 'transportation' ); ?>>transportation</option><option value="travel" <?php selected( $settings['pixabay_category'] ?? '', 'travel' ); ?>>travel</option><option value="buildings" <?php selected( $settings['pixabay_category'] ?? '', 'buildings' ); ?>>buildings</option><option value="business" <?php selected( $settings['pixabay_category'] ?? '', 'business' ); ?>>business</option><option value="music" <?php selected( $settings['pixabay_category'] ?? '', 'music' ); ?>>music</option></select> <input type="text" name="pixabay_colors" value="<?php echo esc_attr( (string) ( $settings['pixabay_colors'] ?? '' ) ); ?>" placeholder="red, blue, grayscale"><p style="margin-top:8px;"><input type="text" class="regular-text srt-stock-query" data-provider="pixabay" placeholder="Search query preview" value="mekong delta taxi"> <button type="button" class="button srt-test-image-source" data-provider="pixabay">Test Source</button> <button type="button" class="button srt-search-image-source" data-provider="pixabay">Search Preview</button></p><div class="srt-image-source-result" id="srt-source-result-pixabay"></div></td></tr>
+			</table>
+			<?php submit_button( __( 'Save Image Sources', 'similar-route-trip' ) ); ?>
+		</form>
+		<p class="description">Fields on this screen are restricted to parameters documented by each provider. Use the REST endpoints or Content Generator preview controls to test individual providers and preview stock results.</p>
+		</div>
+		<?php
+		self::footer();
 	}
 
 	public static function render_content_generator(): void {
@@ -381,7 +415,7 @@ final class AdminMenu {
 					<td><?php echo esc_html( number_format( (float) $route['distance_km'], 1 ) . ' km' ); ?></td>
 					<td><?php echo $post_id > 0 ? esc_html( '#' . $post_id . ' - ' . (string) get_post_status( $post_id ) ) : esc_html__( 'No post', 'similar-route-trip' ); ?></td>
 					<td>
-						<?php self::post_action_form( (int) $route['id'], $post_id > 0 ? __( 'Regenerate Draft', 'similar-route-trip' ) : __( 'Generate Draft', 'similar-route-trip' ), $post_id > 0 ); ?>
+						<?php self::post_action_form( (int) $route['id'], $post_id > 0 ? __( 'Queue Regenerate Draft', 'similar-route-trip' ) : __( 'Queue Draft Job', 'similar-route-trip' ), $post_id > 0 ); ?>
 						<?php if ( $post_id > 0 ) : ?>
 							<a class="button button-small" href="<?php echo esc_url( get_edit_post_link( $post_id, 'raw' ) ); ?>">Edit Post</a>
 							<a class="button button-small" href="<?php echo esc_url( get_permalink( $post_id ) ); ?>" target="_blank" rel="noopener">View Post</a>
@@ -395,19 +429,23 @@ final class AdminMenu {
 		</div>
 		<div class="srt-card">
 		<h2><?php esc_html_e( 'Manual Generator Form', 'similar-route-trip' ); ?></h2>
+		<p>Preview route o truong dau van dung cho live preview. Neu chon nhieu route trong Bulk queue, form se enqueue nhieu job thay vi tao 1 bai ngay trong request admin.</p>
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 			<?php wp_nonce_field( self::NONCE ); ?>
 			<input type="hidden" name="action" value="srt_create_post">
 			<table class="form-table" role="presentation">
 				<tr><th>Route</th><td><select name="route_id" id="srt-route-select"><?php foreach ( $routes as $route ) : ?><option value="<?php echo esc_attr( (string) $route['id'] ); ?>" data-route-label="<?php echo esc_attr( $route['from_city'] . ' - ' . $route['to_city'] ); ?>"><?php echo esc_html( $route['from_city'] . ' - ' . $route['to_city'] . ' (' . $route['slug'] . ')' ); ?></option><?php endforeach; ?></select></td></tr>
+				<tr><th>Bulk queue routes</th><td><select name="route_ids[]" multiple size="8" style="min-width:420px;"><?php foreach ( $routes as $route ) : ?><option value="<?php echo esc_attr( (string) $route['id'] ); ?>"><?php echo esc_html( $route['from_city'] . ' - ' . $route['to_city'] . ' (' . $route['slug'] . ')' ); ?></option><?php endforeach; ?></select><p class="description">Bo trong neu chi muon queue route dang preview.</p></td></tr>
 				<tr><th>Post type / Status</th><td><select name="post_type"><?php foreach ( get_post_types( [ 'public' => true ], 'names' ) as $post_type ) : ?><option value="<?php echo esc_attr( $post_type ); ?>"><?php echo esc_html( $post_type ); ?></option><?php endforeach; ?></select> <select name="status"><option value="draft">draft</option><option value="pending">pending</option><option value="publish">publish</option></select></td></tr>
 				<tr><th>Topic</th><td><select name="topic" id="srt-topic-select"><?php foreach ( $topics as $topic_id => $topic ) : ?><option value="<?php echo esc_attr( $topic_id ); ?>" <?php selected( $topic_id, $selected_topic ); ?>><?php echo esc_html( (string) $topic['label'] ); ?></option><?php endforeach; ?></select></td></tr>
 				<tr><th>Template</th><td><select name="template" id="srt-template-select"><?php foreach ( PromptTemplateManager::get() as $key => $template ) : ?><option value="<?php echo esc_attr( $key ); ?>" <?php selected( $key, $selected_topic ); ?>><?php echo esc_html( ucwords( str_replace( '_', ' ', $key ) ) ); ?></option><?php endforeach; ?></select></td></tr>
 				<tr><th>Content length</th><td><select name="content_length" id="srt-length-select"><option value="short">short</option><option value="standard" selected>standard</option><option value="long">long</option><option value="deep">deep</option><option value="custom">custom</option></select> Min <input type="number" id="srt-min-words" name="min_words" value="1000" min="500" max="12000"> Max <input type="number" id="srt-max-words" name="max_words" value="1400" min="500" max="12000"></td></tr>
 				<tr><th>SEO keywords</th><td><input class="regular-text" id="srt-primary-keyword" name="primary_keyword" placeholder="taxi tra vinh di ben tre"> <br><input class="large-text" id="srt-secondary-keywords" name="secondary_keywords" placeholder="taxi lien tinh, taxi 7 cho, taxi mien tay"></td></tr>
-				<tr><th>Options</th><td><label><input type="checkbox" name="use_ai" value="1"> Use AI content</label><br><label><input type="checkbox" name="regenerate" value="1"> Update existing post if exists</label></td></tr>
+				<tr><th>Options</th><td><label><input type="checkbox" name="use_ai" value="1"> Use AI content</label><br><label><input type="checkbox" name="regenerate" value="1"> Update existing post if exists</label><br><label><input type="checkbox" name="generate_images" value="1" checked> Generate images</label><br><label><input type="checkbox" name="insert_images_into_content" value="1"> Insert into article</label></td></tr>
+				<tr><th>Image mode</th><td><select name="image_source_mode" id="srt-image-source-mode"><option value="">Use global setting</option><option value="ai_generated">AI Generated</option><option value="free_stock">Free Stock API</option><option value="mixed_ai_first">Mixed: AI first</option><option value="mixed_stock_first">Mixed: Stock first</option></select> <select name="image_count" id="srt-image-count"><option value="0">0</option><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select> <select name="image_style" id="srt-image-style"><option value="">Use global style</option><option value="realistic">realistic</option><option value="local_travel">local travel</option><option value="taxi_service">taxi service</option><option value="documentary">documentary</option><option value="clean_banner">clean banner</option></select></td></tr>
+				<tr><th>Image prompt preview</th><td><textarea id="srt-image-prompt-preview" class="large-text code" rows="4" readonly></textarea><p><button type="button" class="button" id="srt-generate-image-preview">Generate Image Preview</button></p><div id="srt-image-preview-results"></div></td></tr>
 			</table>
-			<?php submit_button( __( 'Create Draft/Post', 'similar-route-trip' ) ); ?>
+			<?php submit_button( __( 'Enqueue Draft/Post Jobs', 'similar-route-trip' ) ); ?>
 		</form>
 		</div>
 		<?php self::footer(); ?>
@@ -482,18 +520,28 @@ final class AdminMenu {
 
 	public static function render_tools(): void {
 		self::guard();
-		$stats = QueueRepository::stats();
-		$queue = QueueRepository::recent( 20 );
+		$stats = JobRepository::stats();
+		$queue = JobRepository::recent( 20 );
+		$legacy_stats = QueueRepository::stats();
+		$legacy_queue = QueueRepository::recent( 10 );
+		$worker_config = QueueWorkerConfig::get();
 		$queue_detail = null;
 		$queue_id = isset( $_GET['queue_id'] ) ? (int) $_GET['queue_id'] : 0;
 		if ( $queue_id > 0 ) {
-			$queue_detail = QueueRepository::get( $queue_id );
+			$queue_detail = JobRepository::get( $queue_id );
 		}
-		self::header( __( 'Tools', 'similar-route-trip' ), 'srt-tools' );
+		self::header( __( 'Queue / Workers', 'similar-route-trip' ), 'srt-tools' );
 		echo '<div class="srt-card">';
-		echo '<p><strong>Queue stats:</strong> ';
+		echo '<p><strong>Worker config:</strong> ';
+		echo 'Paused ' . esc_html( ! empty( $worker_config['paused'] ) ? 'yes' : 'no' ) . ', ';
+		echo 'Workers ' . esc_html( (string) ( $worker_config['worker_count'] ?? 1 ) ) . ', ';
+		echo 'Batch ' . esc_html( (string) ( $worker_config['batch_size_per_worker'] ?? 3 ) ) . ', ';
+		echo 'Schedule ' . esc_html( (string) ( $worker_config['schedule_interval'] ?? 'five_minutes' ) ) . '</p>';
+		echo '<p><strong>Job stats:</strong> ';
 		echo 'Pending ' . esc_html( (string) ( $stats['pending'] ?? 0 ) ) . ', ';
+		echo 'Processing ' . esc_html( (string) ( $stats['processing'] ?? 0 ) ) . ', ';
 		echo 'Failed ' . esc_html( (string) ( $stats['failed'] ?? 0 ) ) . ', ';
+		echo 'Retrying ' . esc_html( (string) ( $stats['retrying'] ?? 0 ) ) . ', ';
 		echo 'Completed ' . esc_html( (string) ( $stats['completed'] ?? 0 ) ) . ', ';
 		echo 'Total ' . esc_html( (string) ( $stats['total'] ?? 0 ) ) . '</p>';
 		self::button_form( 'srt_run_queue', __( 'Run Next Batch', 'similar-route-trip' ), 'primary' );
@@ -505,7 +553,7 @@ final class AdminMenu {
 			$route_label = $route ? (string) ( $route['from_city'] ?? '' ) . ' - ' . (string) ( $route['to_city'] ?? '' ) : 'Route #' . (int) ( $queue_detail['route_id'] ?? 0 );
 			echo '<h2>Queue Detail #' . esc_html( (string) ( $queue_detail['id'] ?? '' ) ) . '</h2>';
 			echo '<p><strong>Route:</strong> ' . esc_html( $route_label ) . '<br>';
-			echo '<strong>Task:</strong> ' . esc_html( (string) ( $queue_detail['task_type'] ?? '' ) ) . '<br>';
+			echo '<strong>Task:</strong> ' . esc_html( (string) ( $queue_detail['job_type'] ?? '' ) ) . '<br>';
 			echo '<strong>Status:</strong> ' . esc_html( (string) ( $queue_detail['status'] ?? '' ) ) . '<br>';
 			echo '<strong>Attempts:</strong> ' . esc_html( (string) ( $queue_detail['attempts'] ?? 0 ) ) . ' / ' . esc_html( (string) ( $queue_detail['max_attempts'] ?? 0 ) ) . '<br>';
 			echo '<strong>Updated:</strong> ' . esc_html( (string) ( $queue_detail['updated_at'] ?? '' ) ) . '</p>';
@@ -521,7 +569,7 @@ final class AdminMenu {
 			submit_button( __( 'Retry This Item', 'similar-route-trip' ), 'secondary', 'submit', false );
 			echo '</form>';
 		}
-		echo '<h2>Recent Queue Items</h2>';
+		echo '<h2>Recent Jobs</h2>';
 		echo '<table class="widefat striped"><thead><tr><th>ID</th><th>Route</th><th>Task</th><th>Status</th><th>Attempts</th><th>Max</th><th>Error</th><th>Updated</th><th>Actions</th></tr></thead><tbody>';
 		if ( empty( $queue ) ) {
 			echo '<tr><td colspan="9">No queue items yet.</td></tr>';
@@ -532,7 +580,7 @@ final class AdminMenu {
 			echo '<tr>';
 			echo '<td>' . esc_html( (string) ( $item['id'] ?? '' ) ) . '</td>';
 			echo '<td>' . esc_html( $route_label ) . '</td>';
-			echo '<td>' . esc_html( (string) ( $item['task_type'] ?? '' ) ) . '</td>';
+			echo '<td>' . esc_html( (string) ( $item['job_type'] ?? '' ) ) . '</td>';
 			echo '<td>' . esc_html( (string) ( $item['status'] ?? '' ) ) . '</td>';
 			echo '<td>' . esc_html( (string) ( $item['attempts'] ?? 0 ) ) . '</td>';
 			echo '<td>' . esc_html( (string) ( $item['max_attempts'] ?? 0 ) ) . '</td>';
@@ -550,6 +598,16 @@ final class AdminMenu {
 			}
 			echo '</td>';
 			echo '</tr>';
+		}
+		echo '</tbody></table>';
+		echo '<h2 style="margin-top:20px;">Legacy Queue</h2>';
+		echo '<p>Pending ' . esc_html( (string) ( $legacy_stats['pending'] ?? 0 ) ) . ', Failed ' . esc_html( (string) ( $legacy_stats['failed'] ?? 0 ) ) . ', Completed ' . esc_html( (string) ( $legacy_stats['completed'] ?? 0 ) ) . '.</p>';
+		echo '<table class="widefat striped"><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Updated</th></tr></thead><tbody>';
+		if ( empty( $legacy_queue ) ) {
+			echo '<tr><td colspan="4">No legacy queue items.</td></tr>';
+		}
+		foreach ( $legacy_queue as $item ) {
+			echo '<tr><td>' . esc_html( (string) ( $item['id'] ?? '' ) ) . '</td><td>' . esc_html( (string) ( $item['task_type'] ?? '' ) ) . '</td><td>' . esc_html( (string) ( $item['status'] ?? '' ) ) . '</td><td>' . esc_html( (string) ( $item['updated_at'] ?? '' ) ) . '</td></tr>';
 		}
 		echo '</tbody></table>';
 		echo '</div>';
@@ -588,6 +646,13 @@ final class AdminMenu {
 		self::redirect( 'srt-ai-settings' );
 	}
 
+	public static function handle_save_image_sources(): void {
+		self::verify();
+		SRT_Image_Source_Config::save( wp_unslash( $_POST ) );
+		self::notice( 'success', 'Image source settings saved.' );
+		self::redirect( 'srt-image-sources' );
+	}
+
 	public static function handle_test_ai(): void {
 		self::verify();
 		$result = AIService::provider()->test_connection();
@@ -622,8 +687,23 @@ final class AdminMenu {
 			self::notice( 'error', 'Provider key not found.' );
 			self::redirect( 'srt-ai-settings' );
 		}
-		$result = AIService::test_key( $key );
-		self::notice( empty( $result['success'] ) ? 'error' : 'success', (string) ( $result['message'] ?? $result['error'] ?? 'Provider test complete.' ) );
+		$results = [];
+		if ( ! empty( $key['content_models'] ) ) {
+			$results['content'] = AIService::test_key( $key, 'content' );
+		}
+		if ( ! empty( $key['image_models'] ) ) {
+			$results['image'] = AIService::test_key( $key, 'image' );
+		}
+		if ( empty( $results ) ) {
+			$results['content'] = AIService::test_key( $key, 'content' );
+		}
+		$ok = false;
+		$messages = [];
+		foreach ( $results as $purpose => $result ) {
+			$ok = $ok || ! empty( $result['success'] );
+			$messages[] = strtoupper( $purpose ) . ': ' . (string) ( $result['message'] ?? $result['error'] ?? 'done' );
+		}
+		self::notice( $ok ? 'success' : 'error', implode( ' | ', $messages ) );
 		self::redirect( 'srt-ai-settings' );
 	}
 
@@ -642,6 +722,22 @@ final class AdminMenu {
 			$settings['active_key_id'] = '';
 		}
 		update_option( AIConfig::OPTION, $settings, false );
+		$content_settings = ContentProviderRegistry::get();
+		$content_settings['providers'] = array_values(
+			array_filter(
+				(array) ( $content_settings['providers'] ?? [] ),
+				static fn( array $item ): bool => (string) ( $item['id'] ?? '' ) !== $key_id
+			)
+		);
+		update_option( ContentProviderRegistry::OPTION, $content_settings, false );
+		$image_settings = ImageProviderRegistry::get();
+		$image_settings['providers'] = array_values(
+			array_filter(
+				(array) ( $image_settings['providers'] ?? [] ),
+				static fn( array $item ): bool => ! in_array( (string) ( $item['id'] ?? '' ), [ 'img_' . $key_id, $key_id ], true )
+			)
+		);
+		update_option( ImageProviderRegistry::OPTION, $image_settings, false );
 		self::notice( 'success', 'Provider deleted.' );
 		self::redirect( 'srt-ai-settings' );
 	}
@@ -665,32 +761,41 @@ final class AdminMenu {
 
 	public static function handle_create_post(): void {
 		self::verify();
-		$result = ContentGenerator::create_post(
-			(int) ( $_POST['route_id'] ?? 0 ),
-			[
-				'post_type'  => sanitize_key( (string) wp_unslash( $_POST['post_type'] ?? 'post' ) ),
-				'status'     => sanitize_key( (string) wp_unslash( $_POST['status'] ?? 'draft' ) ),
-				'template'   => sanitize_key( (string) wp_unslash( $_POST['template'] ?? 'route_landing' ) ),
-				'topic'      => sanitize_key( (string) wp_unslash( $_POST['topic'] ?? 'route_landing' ) ),
-				'content_length' => sanitize_key( (string) wp_unslash( $_POST['content_length'] ?? 'standard' ) ),
-				'min_words'  => (int) ( $_POST['min_words'] ?? 1000 ),
-				'max_words'  => (int) ( $_POST['max_words'] ?? 1400 ),
-				'primary_keyword' => sanitize_text_field( (string) wp_unslash( $_POST['primary_keyword'] ?? '' ) ),
-				'secondary_keywords' => sanitize_text_field( (string) wp_unslash( $_POST['secondary_keywords'] ?? '' ) ),
-				'use_ai'     => ! empty( $_POST['use_ai'] ),
-				'regenerate' => ! empty( $_POST['regenerate'] ),
-			]
-		);
-		$message = empty( $result['success'] )
-			? (string) $result['error']
-			: sprintf(
-				'Post created/updated: #%d. Quality: %s. Similarity: %s. Edit: %s',
-				(int) $result['post_id'],
-				isset( $result['quality_score'] ) ? (string) $result['quality_score'] : '-',
-				isset( $result['similarity']['score'] ) ? number_format( (float) $result['similarity']['score'], 4 ) : '-',
-				(string) ( $result['edit_url'] ?? '' )
-			);
-		self::notice( empty( $result['success'] ) ? 'error' : 'success', $message );
+		$runtime_settings = AIConfig::get();
+		$image_settings   = ImageProviderRegistry::get();
+		$default_image_count = 'custom' === (string) ( $image_settings['images_per_post'] ?? '' )
+			? max( 0, min( 8, (int) ( $image_settings['images_per_post_custom'] ?? 1 ) ) )
+			: max( 0, min( 8, (int) ( $image_settings['images_per_post'] ?? 1 ) ) );
+		$default_generate_images = ! empty( $runtime_settings['enable_image'] ) && 'disabled' !== (string) ( $runtime_settings['image_source_mode'] ?? 'disabled' ) && $default_image_count > 0;
+
+		$payload = [
+			'post_type'  => sanitize_key( (string) wp_unslash( $_POST['post_type'] ?? 'post' ) ),
+			'status'     => sanitize_key( (string) wp_unslash( $_POST['status'] ?? 'draft' ) ),
+			'template'   => sanitize_key( (string) wp_unslash( $_POST['template'] ?? 'route_landing' ) ),
+			'topic'      => sanitize_key( (string) wp_unslash( $_POST['topic'] ?? 'route_landing' ) ),
+			'content_length' => sanitize_key( (string) wp_unslash( $_POST['content_length'] ?? 'standard' ) ),
+			'min_words'  => (int) ( $_POST['min_words'] ?? 1000 ),
+			'max_words'  => (int) ( $_POST['max_words'] ?? 1400 ),
+			'primary_keyword' => sanitize_text_field( (string) wp_unslash( $_POST['primary_keyword'] ?? '' ) ),
+			'secondary_keywords' => sanitize_text_field( (string) wp_unslash( $_POST['secondary_keywords'] ?? '' ) ),
+			'use_ai'     => ! empty( $_POST['use_ai'] ),
+			'regenerate' => ! empty( $_POST['regenerate'] ),
+			'generate_images' => array_key_exists( 'generate_images', $_POST ) ? ! empty( $_POST['generate_images'] ) : $default_generate_images,
+			'insert_images_into_content' => ! empty( $_POST['insert_images_into_content'] ),
+			'image_source_mode' => sanitize_key( (string) wp_unslash( $_POST['image_source_mode'] ?? (string) ( $runtime_settings['image_source_mode'] ?? '' ) ) ),
+			'image_count' => absint( $_POST['image_count'] ?? $default_image_count ),
+			'image_style' => sanitize_key( (string) wp_unslash( $_POST['image_style'] ?? '' ) ),
+		];
+		$route_ids = [];
+		if ( ! empty( $_POST['route_ids'] ) && is_array( $_POST['route_ids'] ) ) {
+			$route_ids = array_filter( array_map( 'absint', (array) wp_unslash( $_POST['route_ids'] ) ) );
+		}
+		$single_route_id = absint( $_POST['route_id'] ?? 0 );
+		if ( empty( $route_ids ) && $single_route_id > 0 ) {
+			$route_ids = [ $single_route_id ];
+		}
+		$count = QueueManager::enqueue_bulk_content( $route_ids, $payload );
+		self::notice( $count > 0 ? 'success' : 'error', $count > 0 ? sprintf( 'Queued %d content jobs.', $count ) : 'Unable to queue content job.' );
 		self::redirect( 'srt-content-generator' );
 	}
 
@@ -727,15 +832,17 @@ final class AdminMenu {
 
 	public static function handle_run_queue(): void {
 		self::verify();
-		$result = QueueRunner::run_next_batch( 3 );
-		self::notice( 'success', sprintf( 'Processed %d tasks, completed %d, failed %d.', (int) $result['processed'], (int) $result['completed'], (int) $result['failed'] ) );
+		$worker_result = Worker::run( 'manual-admin', (int) ( QueueWorkerConfig::get()['batch_size_per_worker'] ?? 3 ) );
+		$legacy_result = QueueRunner::run_next_batch( 3 );
+		self::notice( 'success', sprintf( 'Jobs processed %d, completed %d, retrying %d, failed %d. Legacy queue processed %d.', (int) $worker_result['processed'], (int) $worker_result['completed'], (int) $worker_result['retrying'], (int) $worker_result['failed'], (int) $legacy_result['processed'] ) );
 		self::redirect( 'srt-tools' );
 	}
 
 	public static function handle_retry_failed_queue(): void {
 		self::verify();
-		$count = QueueRepository::retry_failed();
-		self::notice( 'success', sprintf( 'Retried %d failed queue items.', $count ) );
+		$count = JobRepository::retry_failed();
+		$legacy = QueueRepository::retry_failed();
+		self::notice( 'success', sprintf( 'Retried %d jobs and %d legacy queue items.', $count, $legacy ) );
 		self::redirect( 'srt-tools' );
 	}
 
@@ -746,16 +853,17 @@ final class AdminMenu {
 			self::notice( 'error', 'Queue item not found.' );
 			self::redirect( 'srt-tools' );
 		}
-		$ok = QueueRepository::retry_item( $queue_id );
-		self::notice( $ok ? 'success' : 'error', $ok ? 'Queue item moved back to pending.' : 'Unable to retry queue item.' );
+		$ok = JobRepository::retry_job( $queue_id );
+		self::notice( $ok ? 'success' : 'error', $ok ? 'Job moved back to pending.' : 'Unable to retry job.' );
 		wp_safe_redirect( admin_url( 'admin.php?page=srt-tools&queue_id=' . $queue_id ) );
 		exit;
 	}
 
 	public static function handle_clear_completed_queue(): void {
 		self::verify();
-		$count = QueueRepository::clear_completed();
-		self::notice( 'success', sprintf( 'Cleared %d completed tasks.', $count ) );
+		$count = JobRepository::clear_completed();
+		$legacy = QueueRepository::clear_completed();
+		self::notice( 'success', sprintf( 'Cleared %d completed jobs and %d legacy tasks.', $count, $legacy ) );
 		self::redirect( 'srt-tools' );
 	}
 
@@ -767,6 +875,270 @@ final class AdminMenu {
 			sprintf( 'Checked %d posts, repaired %d, skipped %d.', (int) ( $result['checked'] ?? 0 ), (int) ( $result['repaired'] ?? 0 ), (int) ( $result['skipped'] ?? 0 ) )
 		);
 		self::redirect( 'srt-tools' );
+	}
+
+	public static function ajax_upsert_provider(): void {
+		self::verify_ajax();
+		$input = isset( $_POST['provider'] ) && is_array( $_POST['provider'] ) ? wp_unslash( $_POST['provider'] ) : [];
+		if ( empty( $input ) ) {
+			wp_send_json_error( [ 'message' => 'Provider payload is required.' ], 400 );
+		}
+
+		$settings = AIConfig::get();
+		$keys     = is_array( $settings['keys'] ?? null ) ? (array) $settings['keys'] : [];
+		if ( empty( $keys ) ) {
+			$keys = AIConfig::keys( false, false );
+		}
+
+		$provider_id = sanitize_key( (string) ( $input['id'] ?? '' ) );
+		$row         = self::sanitize_provider_input( $input, $provider_id );
+		$updated     = false;
+
+		foreach ( $keys as $index => $existing ) {
+			if ( (string) ( $existing['id'] ?? '' ) !== $provider_id ) {
+				continue;
+			}
+			$keys[ $index ] = array_merge( (array) $existing, $row );
+			$updated        = true;
+			break;
+		}
+
+		if ( ! $updated ) {
+			if ( '' === $provider_id ) {
+				$provider_id = sanitize_key( (string) ( $row['label'] ?? '' ) );
+			}
+			if ( '' === $provider_id ) {
+				$provider_id = sanitize_key( substr( md5( wp_json_encode( $row ) . microtime( true ) . wp_rand() ), 0, 12 ) );
+			}
+			$row['id'] = $provider_id;
+			$keys[]    = $row;
+		}
+
+		self::save_ai_settings_with_keys( array_values( $keys ) );
+		wp_send_json_success(
+			[
+				'message'   => $updated ? 'Provider updated.' : 'Provider added.',
+				'providers' => self::ai_provider_summaries(),
+			]
+		);
+	}
+
+	public static function ajax_delete_provider(): void {
+		self::verify_ajax();
+		$provider_id = sanitize_key( (string) ( $_POST['provider_id'] ?? '' ) );
+		if ( '' === $provider_id ) {
+			wp_send_json_error( [ 'message' => 'Provider ID is required.' ], 400 );
+		}
+
+		$settings = AIConfig::get();
+		$keys     = is_array( $settings['keys'] ?? null ) ? (array) $settings['keys'] : [];
+		if ( empty( $keys ) ) {
+			$keys = AIConfig::keys( false, false );
+		}
+		$keys = array_values(
+			array_filter(
+				$keys,
+				static fn( $item ): bool => is_array( $item ) && ( (string) ( $item['id'] ?? '' ) !== $provider_id )
+			)
+		);
+
+		$override = [];
+		if ( (string) ( $settings['active_key_id'] ?? '' ) === $provider_id ) {
+			$override['active_key_id'] = '';
+		}
+		self::save_ai_settings_with_keys( $keys, $override );
+		wp_send_json_success(
+			[
+				'message'   => 'Provider deleted.',
+				'providers' => self::ai_provider_summaries(),
+			]
+		);
+	}
+
+	public static function ajax_test_provider(): void {
+		self::verify_ajax();
+		$provider_id = sanitize_key( (string) ( $_POST['provider_id'] ?? '' ) );
+		if ( '' === $provider_id ) {
+			wp_send_json_error( [ 'message' => 'Provider ID is required.' ], 400 );
+		}
+
+		$key = null;
+		foreach ( AIConfig::keys( false, true ) as $item ) {
+			if ( (string) ( $item['id'] ?? '' ) === $provider_id ) {
+				$key = $item;
+				break;
+			}
+		}
+		if ( ! $key ) {
+			wp_send_json_error( [ 'message' => 'Provider not found.' ], 404 );
+		}
+
+		$results = [];
+		if ( ! empty( $key['content_models'] ) ) {
+			$results['content'] = AIService::test_key( $key, 'content' );
+		}
+		if ( ! empty( $key['image_models'] ) ) {
+			$results['image'] = AIService::test_key( $key, 'image' );
+		}
+		if ( empty( $results ) ) {
+			$results['content'] = AIService::test_key( $key, 'content' );
+		}
+		$ok = false;
+		$messages = [];
+		foreach ( $results as $purpose => $result ) {
+			$ok = $ok || ! empty( $result['success'] );
+			$messages[] = strtoupper( (string) $purpose ) . ': ' . (string) ( $result['message'] ?? $result['error'] ?? 'done' );
+		}
+
+		wp_send_json_success(
+			[
+				'message'   => implode( ' | ', $messages ),
+				'success'   => $ok,
+				'providers' => self::ai_provider_summaries(),
+				'results'   => $results,
+			]
+		);
+	}
+
+	public static function ajax_test_runtime(): void {
+		self::verify_ajax();
+		$mode = sanitize_key( (string) ( $_POST['mode'] ?? 'active' ) );
+
+		if ( 'all' === $mode ) {
+			$results = AIService::test_all_keys();
+			$ok      = 0;
+			foreach ( $results as $item ) {
+				if ( ! empty( $item['result']['success'] ) ) {
+					$ok++;
+				}
+			}
+			wp_send_json_success(
+				[
+					'message'   => sprintf( 'Tested %d providers, %d OK.', count( $results ), $ok ),
+					'success'   => $ok === count( $results ) && count( $results ) > 0,
+					'providers' => self::ai_provider_summaries(),
+				]
+			);
+		}
+
+		$candidate = AIService::first_content_candidate_config();
+		if ( empty( $candidate ) ) {
+			wp_send_json_error( [ 'message' => 'No active content provider available for runtime test.' ], 400 );
+		}
+		$result = AIService::provider_instance( $candidate )->test_connection();
+		AIService::update_provider_status( 'content', (string) ( $candidate['provider_id'] ?? '' ), $result );
+		wp_send_json_success(
+			[
+				'message'   => (string) ( $result['message'] ?? $result['error'] ?? 'Runtime test complete.' ),
+				'success'   => ! empty( $result['success'] ),
+				'providers' => self::ai_provider_summaries(),
+			]
+		);
+	}
+
+	private static function verify_ajax(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'Forbidden.' ], 403 );
+		}
+		check_ajax_referer( self::NONCE, 'nonce' );
+	}
+
+	private static function ai_provider_summaries(): array {
+		$summaries = [];
+		foreach ( AIConfig::keys( false, false ) as $key ) {
+			$key_id = sanitize_key( (string) ( $key['id'] ?? '' ) );
+			if ( '' === $key_id ) {
+				continue;
+			}
+			$content_models = self::normalize_model_list( $key['content_models'] ?? [] );
+			$image_models   = self::normalize_model_list( $key['image_models'] ?? [] );
+			$summaries[]    = [
+				'id'                     => $key_id,
+				'label'                  => sanitize_text_field( (string) ( $key['label'] ?? $key_id ) ),
+				'provider'               => sanitize_text_field( (string) ( $key['provider'] ?? '' ) ),
+				'content_models_preview' => implode( ', ', $content_models ),
+				'image_models_preview'   => implode( ', ', $image_models ),
+				'priority'               => (int) ( $key['priority'] ?? 10 ),
+				'weight'                 => (int) ( $key['weight'] ?? 1 ),
+				'enabled'                => ! empty( $key['enabled'] ),
+				'last_status'            => sanitize_key( (string) ( $key['last_status'] ?? 'not_tested' ) ),
+				'last_message'           => sanitize_text_field( (string) ( $key['last_message'] ?? '' ) ),
+				'last_checked'           => sanitize_text_field( (string) ( $key['last_checked'] ?? '' ) ),
+				'api_key_masked'         => AIKeyVault::mask( AIKeyVault::decrypt( (string) ( $key['api_key'] ?? '' ) ) ),
+				'edit_payload'           => [
+					'id'                  => $key_id,
+					'label'               => sanitize_text_field( (string) ( $key['label'] ?? $key_id ) ),
+					'provider'            => sanitize_text_field( (string) ( $key['provider'] ?? 'shopaikey_compatible' ) ),
+					'base_url'            => esc_url_raw( (string) ( $key['base_url'] ?? '' ) ),
+					'enabled'             => ! empty( $key['enabled'] ) ? 1 : 0,
+					'content_models'      => implode( "\n", $content_models ),
+					'image_models'        => implode( "\n", $image_models ),
+					'image_endpoint'      => sanitize_text_field( (string) ( $key['image_endpoint'] ?? '/images/generations' ) ),
+					'image_edit_endpoint' => sanitize_text_field( (string) ( $key['image_edit_endpoint'] ?? '/images/edits' ) ),
+					'image_api_format'    => sanitize_text_field( (string) ( $key['image_api_format'] ?? 'openai_images' ) ),
+					'priority'            => (int) ( $key['priority'] ?? 10 ),
+					'weight'              => (int) ( $key['weight'] ?? 1 ),
+				],
+			];
+		}
+		return $summaries;
+	}
+
+	private static function sanitize_provider_input( array $input, string $provider_id ): array {
+		$provider = sanitize_text_field( (string) ( $input['provider'] ?? 'shopaikey_compatible' ) );
+		if ( ! in_array( $provider, [ 'shopaikey_compatible', 'openai_compatible', 'gemini_compatible', 'custom_openai_compatible' ], true ) ) {
+			$provider = 'shopaikey_compatible';
+		}
+
+		$image_api_format = sanitize_text_field( (string) ( $input['image_api_format'] ?? 'openai_images' ) );
+		if ( ! in_array( $image_api_format, [ 'openai_images', 'google_genai_image' ], true ) ) {
+			$image_api_format = 'openai_images';
+		}
+
+		return [
+			'id'                  => $provider_id,
+			'label'               => sanitize_text_field( (string) ( $input['label'] ?? '' ) ),
+			'provider'            => $provider,
+			'base_url'            => esc_url_raw( (string) ( $input['base_url'] ?? '' ) ),
+			'api_key'             => trim( (string) ( $input['api_key'] ?? '' ) ),
+			'content_models'      => sanitize_textarea_field( (string) ( $input['content_models'] ?? '' ) ),
+			'image_models'        => sanitize_textarea_field( (string) ( $input['image_models'] ?? '' ) ),
+			'image_endpoint'      => sanitize_text_field( (string) ( $input['image_endpoint'] ?? '/images/generations' ) ),
+			'image_edit_endpoint' => sanitize_text_field( (string) ( $input['image_edit_endpoint'] ?? '/images/edits' ) ),
+			'image_api_format'    => $image_api_format,
+			'enabled'             => ! empty( $input['enabled'] ) ? 1 : 0,
+			'priority'            => max( 1, min( 100, absint( $input['priority'] ?? 10 ) ) ),
+			'weight'              => max( 1, min( 100, absint( $input['weight'] ?? 1 ) ) ),
+		];
+	}
+
+	private static function normalize_model_list( $value ): array {
+		if ( is_array( $value ) ) {
+			$items = [];
+			foreach ( $value as $item ) {
+				if ( is_scalar( $item ) ) {
+					$items[] = sanitize_text_field( trim( (string) $item ) );
+				}
+			}
+			return array_values( array_filter( $items, static fn( string $item ): bool => '' !== $item && 'array' !== strtolower( $item ) ) );
+		}
+		if ( ! is_scalar( $value ) ) {
+			return [];
+		}
+		$parts = preg_split( '/[\r\n,]+/', (string) $value ) ?: [];
+		$clean = array_map( static fn( string $part ): string => sanitize_text_field( trim( $part ) ), $parts );
+		return array_values( array_filter( $clean, static fn( string $item ): bool => '' !== $item && 'array' !== strtolower( $item ) ) );
+	}
+
+	private static function save_ai_settings_with_keys( array $keys, array $overrides = [] ): void {
+		$current          = AIConfig::get();
+		$payload          = $current;
+		$payload['api_key'] = '';
+		$payload['keys']  = $keys;
+		foreach ( $overrides as $key => $value ) {
+			$payload[ $key ] = $value;
+		}
+		AIConfig::save( $payload );
 	}
 
 	private static function header( string $title, string $active_page ): void {
@@ -788,8 +1160,9 @@ final class AdminMenu {
 			'srt-content-generator' => 'Content Generator',
 			'srt-prompt-templates' => 'Prompt Templates',
 			'srt-ai-settings'     => 'AI Settings',
+			'srt-image-sources'   => 'Image Sources',
 			'srt-logs'            => 'Logs',
-			'srt-tools'           => 'Tools',
+			'srt-tools'           => 'Queue / Workers',
 		];
 		echo '<nav class="nav-tab-wrapper srt-tabs">';
 		foreach ( $tabs as $slug => $label ) {
@@ -814,6 +1187,12 @@ final class AdminMenu {
 	}
 
 	private static function post_action_form( int $route_id, string $label, bool $regenerate ): void {
+		$settings = AIConfig::get();
+		$image_settings = ImageProviderRegistry::get();
+		$image_count = 'custom' === (string) ( $image_settings['images_per_post'] ?? '' )
+			? max( 0, min( 8, (int) ( $image_settings['images_per_post_custom'] ?? 1 ) ) )
+			: max( 0, min( 8, (int) ( $image_settings['images_per_post'] ?? 1 ) ) );
+		$default_generate_images = ! empty( $settings['enable_image'] ) && 'disabled' !== (string) ( $settings['image_source_mode'] ?? 'disabled' ) && $image_count > 0;
 		?>
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline-block;margin-right:4px;">
 			<?php wp_nonce_field( self::NONCE ); ?>
@@ -827,6 +1206,10 @@ final class AdminMenu {
 			<input type="hidden" name="min_words" value="1000">
 			<input type="hidden" name="max_words" value="1400">
 			<input type="hidden" name="use_ai" value="1">
+			<input type="hidden" name="generate_images" value="<?php echo esc_attr( $default_generate_images ? '1' : '0' ); ?>">
+			<input type="hidden" name="image_count" value="<?php echo esc_attr( (string) $image_count ); ?>">
+			<input type="hidden" name="image_source_mode" value="<?php echo esc_attr( (string) ( $settings['image_source_mode'] ?? 'disabled' ) ); ?>">
+			<input type="hidden" name="insert_images_into_content" value="<?php echo esc_attr( ! empty( $settings['insert_images_into_content'] ) ? '1' : '0' ); ?>">
 			<?php if ( $regenerate ) : ?>
 				<input type="hidden" name="regenerate" value="1">
 			<?php endif; ?>

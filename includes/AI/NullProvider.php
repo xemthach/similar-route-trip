@@ -8,7 +8,7 @@ final class NullProvider implements ProviderInterface {
 		return [ 'success' => false, 'content' => '', 'error' => 'AI disabled.' ];
 	}
 	public function generate_image( string $prompt, array $args = [] ): array {
-		return [ 'success' => false, 'url' => '', 'error' => 'AI image disabled.' ];
+		return [ 'success' => false, 'url' => '', 'images' => [], 'error' => 'AI image disabled.' ];
 	}
 	public function test_connection(): array {
 		return [ 'success' => true, 'message' => 'AI disabled. Null provider active.' ];

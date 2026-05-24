@@ -1,6 +1,6 @@
 # Tuyen Di Pho Bien (Simular Route Trip)
 
-Version: `0.4.11`
+Version: `0.4.13`
 
 Independent WordPress plugin for popular taxi routes, Similar Route recommendations, Distance Calculator Map pricing bridge, SEO prompts, REST API, and shortcodes.
 
@@ -17,15 +17,15 @@ Independent WordPress plugin for popular taxi routes, Similar Route recommendati
 - Import routes from legacy `wp_taxi_routes`.
 - Read vehicle/service pricing from Distance Calculator Map.
 - Generate per-vehicle price matrix.
-- Admin pages: **All Routes**, **Import / Sync**, **Route Generator**, **Content Generator**, **Prompt Templates**, **AI Settings**, **Logs**, **Tools**.
+- Admin pages: **All Routes**, **Import / Sync**, **Route Generator**, **Content Generator**, **Prompt Templates**, **AI Settings**, **Image Sources**, **Logs**, **Queue / Workers**.
 - Create new routes manually or in bulk with duplicate detection.
 - Generate SEO landing content from route data.
-- Optional AI text/image generation with independent plugin settings.
+- Optional AI text/image generation with separate runtime, content-provider, image-provider, and image-source fallback controls.
 - Multi-key and multi-model AI routing with per-key test status.
 - Optional runtime use of AI Commerce Agent provider config without copying API keys.
-- Upload generated/external images to Media Library and set featured image.
-- Lightweight queue for batch content/image tasks.
-- Five-minute queue cron with retry failed and per-item retry controls in the admin Tools screen.
+- Upload generated/external images to Media Library, set featured image, and insert selected images into article content.
+- Background jobs for batch content generation plus a legacy queue bridge for older image tasks.
+- Worker-based queue processing with retry support and a Queue / Workers admin screen.
 - Logs for import, sync, AI requests, post creation, and errors.
 - REST namespace: `/wp-json/similar-route-trip/v1`.
 - Shortcodes:
@@ -73,7 +73,7 @@ Templates can be edited or reset to defaults.
 
 ## Safety notes
 
-- The plugin keeps data in its own tables: `wp_srt_routes`, `wp_srt_queue`, `wp_srt_logs`.
+- The plugin keeps data in its own tables: `wp_srt_routes`, `wp_srt_queue`, `wp_srt_jobs`, `wp_srt_logs`.
 - Migration from `0.1.0` to `0.2.0` is additive and does not drop route rows.
 - AI generation is disabled by default.
 - Existing shortcodes and public route REST endpoints remain compatible.

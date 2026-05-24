@@ -51,6 +51,7 @@ final class QueueRunner {
 				if ( ! $route ) {
 					return [ 'success' => false, 'error' => 'Route not found.' ];
 				}
+				$payload['queue_id'] = (int) ( $item['id'] ?? 0 );
 				return ImageGenerator::generate_for_route(
 					$route,
 					(int) ( $payload['post_id'] ?? $route['post_id'] ?? 0 ),

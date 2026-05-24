@@ -11,7 +11,7 @@ final class QueueRepository {
 		return $wpdb->prefix . 'srt_queue';
 	}
 
-	public static function add( int $route_id, string $task_type, array $payload = [] ): int {
+	public static function add( int $route_id, string $task_type, array $payload = [], int $max_attempts = 3 ): int {
 		global $wpdb;
 		$inserted = $wpdb->insert(
 			self::table(),
@@ -19,11 +19,12 @@ final class QueueRepository {
 				'route_id'      => $route_id,
 				'task_type'     => sanitize_key( $task_type ),
 				'status'        => 'pending',
+				'max_attempts'  => max( 1, min( 5, $max_attempts ) ),
 				'payload_json'  => wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ),
 				'created_at'    => current_time( 'mysql' ),
 				'updated_at'    => current_time( 'mysql' ),
 			],
-			[ '%d', '%s', '%s', '%s', '%s', '%s' ]
+			[ '%d', '%s', '%s', '%d', '%s', '%s', '%s' ]
 		);
 		return false !== $inserted ? (int) $wpdb->insert_id : 0;
 	}

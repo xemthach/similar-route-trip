@@ -13,6 +13,7 @@ use SimilarRouteTrip\Database\RouteRepository;
 use SimilarRouteTrip\AI\AIService;
 use SimilarRouteTrip\Content\ContentGenerator;
 use SimilarRouteTrip\Image\ImageGenerator;
+use SimilarRouteTrip\Image\SRT_Image_Manager;
 use SimilarRouteTrip\Routes\RouteImporter;
 use SimilarRouteTrip\Routes\RouteCreator;
 use SimilarRouteTrip\Routes\SimilarRouteFinder;
@@ -92,6 +93,10 @@ final class RestController {
 			'/content/generate-preview' => 'content_generate_preview',
 			'/content/create-post'      => 'content_create_post',
 			'/image/generate'           => 'image_generate',
+			'/images/generate-preview'  => 'images_generate_preview',
+			'/images/attach-to-post'    => 'images_attach_to_post',
+			'/images/search-stock'      => 'images_search_stock',
+			'/images/test-source'       => 'images_test_source',
 		];
 
 		foreach ( $admin_routes as $route => $callback ) {
@@ -261,7 +266,64 @@ final class RestController {
 				[
 					'external_url' => esc_url_raw( (string) $request->get_param( 'external_url' ) ),
 					'overwrite'    => (bool) $request->get_param( 'overwrite' ),
+					'image_count'  => (int) $request->get_param( 'image_count' ),
+					'image_source_mode' => sanitize_key( (string) $request->get_param( 'image_source_mode' ) ),
+					'image_style'  => sanitize_key( (string) $request->get_param( 'image_style' ) ),
+					'insert_images_into_content' => (bool) $request->get_param( 'insert_images_into_content' ),
 				]
+			)
+		);
+	}
+
+	public static function images_generate_preview( \WP_REST_Request $request ) {
+		$route_id = (int) $request->get_param( 'route_id' );
+		return rest_ensure_response(
+			SRT_Image_Manager::preview_candidates(
+				$route_id,
+				(int) $request->get_param( 'post_id' ),
+				[
+					'prompt' => sanitize_textarea_field( (string) $request->get_param( 'prompt' ) ),
+					'image_count' => (int) $request->get_param( 'image_count' ),
+					'image_source_mode' => sanitize_key( (string) $request->get_param( 'image_source_mode' ) ),
+					'image_style' => sanitize_key( (string) $request->get_param( 'image_style' ) ),
+				]
+			)
+		);
+	}
+
+	public static function images_attach_to_post( \WP_REST_Request $request ) {
+		return rest_ensure_response(
+			SRT_Image_Manager::generate_for_post(
+				(int) $request->get_param( 'route_id' ),
+				(int) $request->get_param( 'post_id' ),
+				[
+					'overwrite' => (bool) $request->get_param( 'overwrite' ),
+					'image_count' => (int) $request->get_param( 'image_count' ),
+					'image_source_mode' => sanitize_key( (string) $request->get_param( 'image_source_mode' ) ),
+					'image_style' => sanitize_key( (string) $request->get_param( 'image_style' ) ),
+					'insert_images_into_content' => (bool) $request->get_param( 'insert_images_into_content' ),
+					'prompt' => sanitize_textarea_field( (string) $request->get_param( 'prompt' ) ),
+				]
+			)
+		);
+	}
+
+	public static function images_search_stock( \WP_REST_Request $request ) {
+		return rest_ensure_response(
+			SRT_Image_Manager::search_stock_images(
+				sanitize_key( (string) $request->get_param( 'provider' ) ),
+				sanitize_text_field( (string) $request->get_param( 'query' ) ),
+				[
+					'count' => (int) $request->get_param( 'count' ),
+				]
+			)
+		);
+	}
+
+	public static function images_test_source( \WP_REST_Request $request ) {
+		return rest_ensure_response(
+			SRT_Image_Manager::test_source(
+				sanitize_key( (string) $request->get_param( 'provider' ) )
 			)
 		);
 	}

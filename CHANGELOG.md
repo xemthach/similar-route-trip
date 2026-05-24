@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.13 - 2026-05-23
+
+- Split the AI runtime into separate runtime, content-provider, and image-provider registries with backward-compatible migration from the legacy `srt_ai_settings` option.
+- Added failover-aware provider orchestration, cooldown/daily-usage tracking, and ShopAIKey/OpenAI/Gemini-safe endpoint handling so image config no longer overrides the content path.
+- Added a new `wp_srt_jobs` worker queue for background content generation jobs while keeping the legacy queue alive for older image tasks and pending items.
+- Switched admin content generation actions to enqueue jobs instead of calling AI directly inside the admin request, reducing slow page loads and keeping image work optional after post creation.
+
+## 0.4.12 - 2026-05-23
+
+- Added an image pipeline manager with AI, Unsplash, Pexels, Pixabay, and placeholder providers plus source fallback ordering.
+- Added Image Settings in AI Settings, a new Image Sources admin page, and Content Generator image preview controls with admin-only REST endpoints for preview, attach, stock search, and source testing.
+- Added Media Library metadata for generated images, SEO-friendly filenames, featured-image assignment, in-content image insertion, stage-aware queue statuses, and expanded image pipeline logging while keeping post creation fail-safe when image work fails.
+
 ## 0.4.11 - 2026-05-20
 
 - Added a detail view and per-item retry action for queue items in the admin Tools screen.

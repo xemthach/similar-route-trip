@@ -3,10 +3,6 @@ declare( strict_types=1 );
 
 namespace SimilarRouteTrip\Image;
 
-use SimilarRouteTrip\AI\AIConfig;
-use SimilarRouteTrip\AI\AIService;
-use SimilarRouteTrip\Content\PlaceholderResolver;
-use SimilarRouteTrip\Content\PromptTemplateManager;
 use SimilarRouteTrip\Database\RouteRepository;
 
 defined( 'ABSPATH' ) || exit;
@@ -21,42 +17,26 @@ final class ImageGenerator {
 		if ( $post_id <= 0 ) {
 			return [ 'success' => false, 'error' => 'Post not found for image assignment.' ];
 		}
-		return self::generate_for_post(
-			$route_id,
-			$post_id,
-			! empty( $args['overwrite'] ),
-			esc_url_raw( (string) ( $args['external_url'] ?? '' ) )
-		);
+		$normalized_args = is_array( $args ) ? $args : [];
+		$normalized_args['overwrite'] = ! empty( $normalized_args['overwrite'] ) ? 1 : 0;
+		if ( isset( $normalized_args['external_url'] ) ) {
+			$normalized_args['external_url'] = esc_url_raw( (string) $normalized_args['external_url'] );
+		}
+		return SRT_Image_Manager::generate_for_post( $route_id, $post_id, $normalized_args );
 	}
 
 	public static function generate_for_post( int $route_id, int $post_id, bool $overwrite = false, string $external_url = '' ): array {
-		if ( has_post_thumbnail( $post_id ) && ! $overwrite ) {
-			return [ 'success' => false, 'error' => 'Featured image already exists.' ];
-		}
 		$route = RouteRepository::get_by_id( $route_id );
 		if ( ! $route ) {
 			return [ 'success' => false, 'error' => 'Route not found.' ];
 		}
-		$url = $external_url;
-		if ( '' === $url ) {
-			$config = AIConfig::get();
-			if ( empty( $config['enable_image'] ) ) {
-				return [ 'success' => false, 'error' => 'AI image generation disabled.' ];
-			}
-			$prompt = PlaceholderResolver::resolve( PromptTemplateManager::get()['image_prompt'], $route );
-			$result = AIService::image_provider()->generate_image( $prompt );
-			if ( empty( $result['success'] ) ) {
-				return $result;
-			}
-			$url = (string) $result['url'];
+		$args = [
+			'overwrite'    => $overwrite,
+			'external_url' => $external_url,
+		];
+		if ( '' !== $external_url ) {
+			$args['image_count'] = 1;
 		}
-		$alt = sprintf( 'Taxi %s di %s', $route['from_city'], $route['to_city'] );
-		$image_id = MediaUploader::sideload( $url, $post_id, $alt );
-		if ( ! $image_id ) {
-			return [ 'success' => false, 'error' => 'Image upload failed.' ];
-		}
-		set_post_thumbnail( $post_id, $image_id );
-		RouteRepository::update_generation_meta( $route_id, [ 'image_id' => $image_id ] );
-		return [ 'success' => true, 'image_id' => $image_id ];
+		return SRT_Image_Manager::generate_for_post( $route_id, $post_id, $args );
 	}
 }

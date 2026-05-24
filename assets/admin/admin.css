@@ -44,8 +44,14 @@
 	max-width: 350px;
 }
 
-.srt-admin .srt-provider-table textarea {
-	min-width: 160px;
+.srt-admin .srt-provider-table th,
+.srt-admin .srt-provider-table td {
+	white-space: normal;
+	word-break: break-word;
+}
+
+.srt-admin .srt-provider-table td:last-child {
+	min-width: 190px;
 }
 
 .srt-admin .srt-actions-row {
@@ -85,6 +91,51 @@
 
 .srt-admin .srt-provider-editor-row td {
 	background: #f8fafc;
+}
+
+.srt-admin .srt-modal[hidden] {
+	display: none;
+}
+
+.srt-admin .srt-modal {
+	position: fixed;
+	inset: 0;
+	background: rgba(17, 24, 39, 0.45);
+	z-index: 100000;
+	padding: 24px;
+	overflow: auto;
+}
+
+.srt-admin .srt-modal-dialog {
+	max-width: 920px;
+	margin: 0 auto;
+	background: #fff;
+	border-radius: 8px;
+	box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+	padding: 18px 20px;
+}
+
+.srt-admin .srt-modal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	border-bottom: 1px solid #e5e7eb;
+	padding-bottom: 8px;
+	margin-bottom: 10px;
+}
+
+.srt-admin .srt-modal-header h3 {
+	margin: 0;
+}
+
+.srt-admin .srt-modal-header .button-link {
+	font-size: 26px;
+	line-height: 1;
+	text-decoration: none;
+}
+
+.srt-admin .srt-ai-settings-page .notice.inline {
+	margin: 12px 0 0;
 }
 
 .srt-admin .srt-preview-panel {
