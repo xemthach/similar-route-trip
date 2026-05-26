@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1] - 2026-05-26
+
+### Added
+- Added a standalone, minimal bootstrap cron trigger script `srt-cron-trigger.php` to execute the queue directly via system cron (cPanel) without relying on web-traffic WP-Cron triggers. Bypasses warnings about `$_SERVER` variables on CLI.
+
+### Fixed
+- Fixed job queue lock issues by implementing a stuck-job releasing mechanism (`release_stuck_jobs`) that resets jobs locked in `processing` state for more than 30 minutes back to `pending`.
+- Fixed race conditions in the legacy queue execution by immediately marking fetched items as `processing` before processing.
+
 ## [0.5.0] - 2026-05-24
 
 ### Added

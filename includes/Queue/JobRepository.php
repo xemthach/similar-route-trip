@@ -214,6 +214,24 @@ final class JobRepository {
 		return $row ?: null;
 	}
 
+	public static function release_stuck_jobs( int $timeout_seconds = 1800 ): int {
+		global $wpdb;
+		$threshold = gmdate( 'Y-m-d H:i:s', time() - $timeout_seconds );
+		return (int) $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE " . self::table() . " 
+				 SET status = 'pending', 
+				     error_message = 'Job timed out or worker crashed. Automatically released.', 
+				     locked_at = NULL, 
+				     worker_id = '', 
+				     updated_at = %s 
+				 WHERE status = 'processing' AND locked_at <= %s",
+				current_time( 'mysql' ),
+				$threshold
+			)
+		);
+	}
+
 	private static function update_status( int $id, string $status, string $error = '' ): void {
 		global $wpdb;
 		$wpdb->update(

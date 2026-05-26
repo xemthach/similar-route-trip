@@ -21,6 +21,7 @@ final class QueueRunner {
 
 		foreach ( $items as $item ) {
 			$results['processed']++;
+			QueueRepository::update_status( (int) $item['id'], 'processing' );
 			QueueRepository::increment_attempts( (int) $item['id'] );
 			$result = self::run_item( $item );
 			if ( empty( $result['success'] ) ) {

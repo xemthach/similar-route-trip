@@ -81,6 +81,9 @@ final class Plugin {
 	}
 
 	public static function run_queue_cron(): void {
+		if ( class_exists( \SimilarRouteTrip\Queue\JobRepository::class ) ) {
+			\SimilarRouteTrip\Queue\JobRepository::release_stuck_jobs( 1800 );
+		}
 		$config = QueueWorkerConfig::get();
 		if ( ! empty( $config['paused'] ) ) {
 			return;
